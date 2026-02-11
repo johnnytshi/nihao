@@ -50,43 +50,144 @@ Downloads SCRFD (face detection) and ArcFace (embedding) models to `models/`.
 cargo build --release
 ```
 
-### 4. Enroll Your Face
+### 4. Install Models System-Wide
 
 ```bash
-./nihao.sh add
-./nihao.sh test  # Verify it works
+# Create model directory
+sudo mkdir -p /usr/share/nihao/models
+
+# Copy models (follow symlinks)
+sudo cp -L models/scrfd_500m.onnx /usr/share/nihao/models/
+sudo cp -L models/arcface_mobilefacenet.onnx /usr/share/nihao/models/
+
+# Verify
+ls -lh /usr/share/nihao/models/
+```
+
+### 5. Install System Configuration
+
+```bash
+# Create config directory
+sudo mkdir -p /etc/nihao
+
+# Create system config with absolute paths
+sudo tee /etc/nihao/nihao.toml > /dev/null <<'EOF'
+[camera]
+device = "/dev/video2"
+width = 640
+height = 480
+detection_scale = 0.5
+dark_threshold = 80.0
+
+[detection]
+model_path = "/usr/share/nihao/models/scrfd_500m.onnx"
+confidence_threshold = 0.5
+
+[embedding]
+model_path = "/usr/share/nihao/models/arcface_mobilefacenet.onnx"
+
+[matching]
+threshold = 0.4
+max_frames = 10
+timeout_secs = 4
+
+[storage]
+database_path = "/var/lib/nihao/faces"
+
+[debug]
+save_screenshots = false
+output_dir = "~/.cache/nihao/debug"
+EOF
+
+# Create face storage directory
+sudo mkdir -p /var/lib/nihao/faces
+sudo chmod 755 /var/lib/nihao/faces
+```
+
+### 6. Install CLI Binary (Optional)
+
+```bash
+# Install CLI tool for enrolling faces
+sudo cp target/release/nihao /usr/local/bin/nihao
+sudo chmod 755 /usr/local/bin/nihao
+
+# Now you can use it without ./nihao.sh
+nihao add               # Enroll your face
+nihao test              # Test authentication
+nihao list              # List enrolled faces
+```
+
+Or keep using `./nihao.sh` wrapper script.
+
+### 7. Enroll Your Face
+
+```bash
+./nihao.sh add          # Or: nihao add (if installed)
+./nihao.sh test         # Verify it works
 ```
 
 Faces are stored in `/var/lib/nihao/faces/`.
 
-### 5. Install PAM Module
+### 8. Install PAM Module
 
 ```bash
 # Install PAM module
 sudo cp target/release/libpam_nihao.so /lib/security/pam_nihao.so
 sudo chmod 755 /lib/security/pam_nihao.so
-
-# Configure PAM for sudo
-sudo nano /etc/pam.d/sudo
 ```
 
-Add this line at the **top** (before other auth lines):
+### 9. Configure PAM (System-Wide)
 
-```
-auth sufficient pam_nihao.so
-```
-
-Save and exit. Now test:
+Edit `/etc/pam.d/system-auth` to enable face auth for everything:
 
 ```bash
+sudo nano /etc/pam.d/system-auth
+```
+
+Add this line at the **top** (after `#%PAM-1.0`, before other auth lines):
+
+```
+auth       sufficient                  pam_nihao.so
+```
+
+Save and exit. This enables face auth for:
+- sudo
+- login screen (SDDM/GDM)
+- screen lock
+- TTY console
+- All system authentication
+
+### 10. Test It!
+
+```bash
+sudo -k  # Clear credential cache
 sudo echo "Testing face auth..."
 ```
 
 Your camera should activate and authenticate you in ~1 second! If face auth fails, you'll get a password prompt (fallback always works).
 
+Try locking your screen - it should unlock with your face! 🚀
+
+## File Locations
+
+After installation, files are organized as follows:
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| **Models** | `/usr/share/nihao/models/*.onnx` | Face detection & embedding models |
+| **Config** | `/etc/nihao/nihao.toml` | System-wide configuration |
+| **Faces** | `/var/lib/nihao/faces/` | Enrolled face embeddings per user |
+| **PAM Module** | `/lib/security/pam_nihao.so` | PAM authentication module |
+| **CLI Binary** | `/usr/local/bin/nihao` (optional) | Command-line tool |
+| **PAM Config** | `/etc/pam.d/system-auth` | PAM configuration |
+
+**User-specific files:**
+- `~/.config/nihao/nihao.toml` - User config (overrides system config)
+- `~/.cache/nihao/debug/` - Debug screenshots (if enabled)
+
 ## Configuration
 
-Config file: `~/.config/nihao/nihao.toml` or `/etc/nihao/nihao.toml`
+Config file: `/etc/nihao/nihao.toml` (system-wide) or `~/.config/nihao/nihao.toml` (user-specific)
 
 ```toml
 [camera]
@@ -97,11 +198,11 @@ detection_scale = 0.5            # Use 320x240 for detection (4x faster)
 dark_threshold = 80.0            # Filter bad IR frames
 
 [detection]
-model_path = "models/scrfd_500m.onnx"
+model_path = "/usr/share/nihao/models/scrfd_500m.onnx"  # System-wide models
 confidence_threshold = 0.5
 
 [embedding]
-model_path = "models/arcface_mobilefacenet.onnx"
+model_path = "/usr/share/nihao/models/arcface_mobilefacenet.onnx"
 
 [matching]
 threshold = 0.4                  # Cosine similarity threshold
