@@ -1,0 +1,19 @@
+[package]
+name = "pam-nihao"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+name = "pam_nihao"
+path = "src/lib.rs"
+
+[dependencies]
+nihao-core = { path = "../nihao-core" }
+pamsm.workspace = true
+lazy_static.workspace = true
+syslog.workspace = true
+log.workspace = true

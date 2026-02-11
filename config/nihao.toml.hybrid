@@ -1,0 +1,46 @@
+# Hybrid RGB+IR Configuration
+# Uses RGB camera for face detection (accurate)
+# Uses IR camera for embedding (works in dark)
+
+[camera]
+# Primary camera (RGB) - used for face detection
+device = "/dev/video0"
+width = 640
+height = 480
+prefer_ir = false                 # Use RGB for detection
+apply_clahe = false               # RGB doesn't need heavy preprocessing
+
+# Hybrid mode settings
+use_hybrid_mode = true            # Enable RGB detection + IR embedding
+ir_device = "/dev/video2"         # IR camera for embedding (adjust if needed)
+
+# IR preprocessing (applied to IR camera only)
+clahe_clip_limit = 2.0
+clahe_tile_size = 8
+auto_gamma_correction = true
+gamma_value = 2.0
+stretch_histogram = true
+dark_threshold = 80.0
+force_exposure_fusion = false     # Not needed with hybrid mode
+
+[detection]
+model_path = "models/scrfd_500m.onnx"
+confidence_threshold = 0.5
+
+[embedding]
+model_path = "models/arcface_mobilefacenet.onnx"
+
+[matching]
+threshold = 0.4
+max_frames = 10
+timeout_secs = 3
+
+[runtime]
+provider = "cpu"
+
+[storage]
+database_path = "/var/lib/nihao/faces"
+
+[debug]
+save_screenshots = true
+output_dir = "~/.cache/nihao/debug"

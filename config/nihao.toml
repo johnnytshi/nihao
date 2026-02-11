@@ -1,0 +1,40 @@
+# NiHao Facial Authentication System Configuration
+
+[camera]
+# Camera device path (usually /dev/video0)
+device = "/dev/video0"
+# Camera resolution
+width = 640
+height = 480
+# Prefer IR camera if available (better for low-light conditions)
+prefer_ir = true
+
+[detection]
+# Path to SCRFD face detection model
+model_path = "models/scrfd_500m.onnx"
+# Minimum confidence threshold for face detection (0.0-1.0)
+confidence_threshold = 0.5
+
+[embedding]
+# Path to ArcFace embedding model
+model_path = "models/arcface_mobilefacenet.onnx"
+
+[matching]
+# Cosine similarity threshold for matching (-1.0 to 1.0)
+# Lower = stricter, Higher = more permissive
+# Recommended: 0.3-0.5
+threshold = 0.4
+# Maximum number of frames to try before giving up
+max_frames = 10
+# Timeout in seconds for authentication attempt
+timeout_secs = 3
+
+[runtime]
+# ONNX Runtime execution provider: "cpu", "cuda", or "rocm"
+# Note: ROCm and CUDA require custom-built ONNX Runtime
+provider = "cpu"
+
+[storage]
+# Path to face database directory
+# User faces are stored in subdirectories: <database_path>/<username>/
+database_path = "/var/lib/nihao/faces"

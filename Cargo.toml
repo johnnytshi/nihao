@@ -1,0 +1,44 @@
+[workspace]
+members = ["nihao-core", "nihao-cli", "pam-nihao"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["NiHao Contributors"]
+license = "MIT"
+
+[workspace.dependencies]
+# Core dependencies
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+thiserror = "1.0"
+anyhow = "1.0"
+
+# ML dependencies
+ort = { version = "2.0.0-rc.11", default-features = false, features = ["load-dynamic"] }
+ndarray = { version = "0.15", features = ["serde"] }
+
+# Image processing
+image = "0.25"
+imageproc = "0.25"
+
+# Camera capture
+v4l = "0.14"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Storage
+bincode = "1.3"
+chrono = { version = "0.4", features = ["serde"] }
+
+# PAM
+pamsm = "0.4"
+lazy_static = "1.4"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+syslog = "6.1"

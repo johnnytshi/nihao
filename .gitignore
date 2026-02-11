@@ -1,0 +1,31 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# Models (large files, download with script)
+models/*.onnx
+
+# Test outputs
+*.png
+*.jpg
+*.jpeg
+test_*.bin
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config
+local.toml
+
+# Face database (contains user data)
+/var/lib/nihao/

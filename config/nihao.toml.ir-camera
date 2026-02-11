@@ -1,0 +1,44 @@
+# Recommended Configuration for IR Cameras with Overexposure Issues
+# Copy this to ~/.config/nihao/nihao.toml to use
+
+[camera]
+device = "/dev/video0"
+width = 640
+height = 480
+prefer_ir = true
+apply_clahe = true
+
+# CLAHE parameters - Start with Howdy's proven value
+# If you still see false positives, try increasing to 40.0-80.0
+clahe_clip_limit = 2.0
+clahe_tile_size = 8
+
+# Advanced IR preprocessing (Howdy-inspired approach)
+# These filters dramatically reduce false positives from bad IR frames
+auto_gamma_correction = true      # Automatically darken overexposed regions
+gamma_value = 2.0                 # Gamma > 1.0 darkens the image (2.0 = aggressive, try 2.5-3.0 for very bright)
+stretch_histogram = true          # Stretch to full dynamic range before CLAHE
+dark_threshold = 80.0             # CRITICAL: Filter bad IR emitter frames (increased to 80 for flashing IR)
+force_exposure_fusion = true      # NEW: Always merge bright+dark frames (HDR-like) for flashing IR
+
+[detection]
+model_path = "models/scrfd_500m.onnx"
+confidence_threshold = 0.5        # Keep at 0.5 with proper validation
+
+[embedding]
+model_path = "models/arcface_mobilefacenet.onnx"
+
+[matching]
+threshold = 0.4
+max_frames = 10
+timeout_secs = 3
+
+[runtime]
+provider = "cpu"                  # or "cuda" or "rocm"
+
+[storage]
+database_path = "/var/lib/nihao/faces"
+
+[debug]
+save_screenshots = true
+output_dir = "~/.cache/nihao/debug"

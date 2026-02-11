@@ -1,0 +1,38 @@
+# NiHao Face Recognition Configuration Example
+# Copy this file to ~/.config/nihao/nihao.toml to customize settings
+
+[camera]
+device = "/dev/video0"
+width = 640
+height = 480
+prefer_ir = true  # Prefer infrared camera if available
+apply_clahe = true  # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+
+[detection]
+model_path = "models/scrfd_500m.onnx"
+confidence_threshold = 0.5  # Minimum confidence for face detection (0.0-1.0)
+
+[embedding]
+model_path = "models/arcface_mobilefacenet.onnx"
+
+[matching]
+threshold = 0.4  # Similarity threshold for face matching (-1.0 to 1.0)
+max_frames = 10  # Maximum frames to try for authentication
+timeout_secs = 3  # Timeout in seconds
+
+[runtime]
+provider = "cpu"  # Options: "cpu", "cuda", "rocm"
+
+[storage]
+database_path = "/var/lib/nihao/faces"
+
+[debug]
+save_screenshots = true  # Automatically save debug screenshots
+output_dir = "~/.cache/nihao/debug"  # Directory for debug screenshots
+
+# Alternative debug directory options:
+# output_dir = "/tmp/nihao/debug"  # Use /tmp for temporary storage
+# output_dir = "/home/username/nihao-debug"  # Use custom directory
+
+# To disable automatic screenshots:
+# save_screenshots = false
