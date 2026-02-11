@@ -79,41 +79,43 @@ else
 fi
 
 echo
-echo -e "${GREEN}✓ NiHao uninstalled successfully!${NC}"
-echo
-echo -e "${YELLOW}Note: The following were NOT removed (delete manually if desired):${NC}"
-echo
-if [ -d /usr/share/nihao ]; then
-    echo -e "  Models ($(du -sh /usr/share/nihao/models 2>/dev/null | cut -f1)):"
-    echo "    sudo rm -rf /usr/share/nihao"
-fi
-if [ -f /etc/nihao/nihao.toml ]; then
-    echo "  Config:"
-    echo "    sudo rm -rf /etc/nihao"
-fi
-if [ -d /var/lib/nihao ]; then
-    echo -e "  Face data ($(du -sh /var/lib/nihao 2>/dev/null | cut -f1)):"
-    echo "    sudo rm -rf /var/lib/nihao"
-fi
+echo -e "${GREEN}✓ NiHao core components uninstalled!${NC}"
 echo
 
-read -p "Do you want to remove models, config, and face data? (y/N) " -n 1 -r
+# Remove models and config automatically (system files, not user data)
+echo -e "${BLUE}Removing models and configuration...${NC}"
+if [ -d /usr/share/nihao ]; then
+    MODEL_SIZE=$(du -sh /usr/share/nihao 2>/dev/null | cut -f1)
+    rm -rf /usr/share/nihao && echo -e "${GREEN}✓ Removed models ($MODEL_SIZE)${NC}"
+fi
+if [ -d /etc/nihao ]; then
+    rm -rf /etc/nihao && echo -e "${GREEN}✓ Removed config${NC}"
+fi
+
 echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
+
+# Ask about face data separately (this is user data)
+if [ -d /var/lib/nihao ]; then
+    FACE_SIZE=$(du -sh /var/lib/nihao 2>/dev/null | cut -f1)
+    echo -e "${YELLOW}Face data directory exists: /var/lib/nihao/ ($FACE_SIZE)${NC}"
+    echo "This contains your enrolled face embeddings."
     echo
-    echo -e "${RED}WARNING: This will permanently delete all enrolled faces!${NC}"
-    read -p "Are you sure? (type 'yes' to confirm) " -r
+    read -p "Do you want to delete your enrolled face data? (y/N) " -n 1 -r
     echo
-    if [[ $REPLY == "yes" ]]; then
-        [ -d /usr/share/nihao ] && rm -rf /usr/share/nihao && echo -e "${GREEN}✓ Removed models${NC}"
-        [ -d /etc/nihao ] && rm -rf /etc/nihao && echo -e "${GREEN}✓ Removed config${NC}"
-        [ -d /var/lib/nihao ] && rm -rf /var/lib/nihao && echo -e "${GREEN}✓ Removed face data${NC}"
-        echo -e "${GREEN}✓ Complete removal finished!${NC}"
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo
+        echo -e "${RED}WARNING: This will permanently delete all enrolled faces!${NC}"
+        read -p "Are you sure? (type 'yes' to confirm) " -r
+        echo
+        if [[ $REPLY == "yes" ]]; then
+            rm -rf /var/lib/nihao && echo -e "${GREEN}✓ Removed face data${NC}"
+        else
+            echo -e "${YELLOW}Kept face data at /var/lib/nihao/${NC}"
+        fi
     else
-        echo -e "${YELLOW}Skipped data removal.${NC}"
+        echo -e "${YELLOW}Kept face data at /var/lib/nihao/${NC}"
+        echo "To remove later: sudo rm -rf /var/lib/nihao"
     fi
-else
-    echo -e "${YELLOW}Skipped data removal.${NC}"
 fi
 
 echo

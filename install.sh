@@ -95,16 +95,15 @@ sudo -u "$ACTUAL_USER" cargo build --release
 echo -e "${GREEN}✓ Build complete${NC}"
 
 # 2. Download and install models
-echo -e "${BLUE}[2/7] Installing models...${NC}"
+echo -e "${BLUE}[2/7] Downloading and installing models...${NC}"
 
-if [ ! -f models/scrfd_500m.onnx ] || [ ! -f models/arcface_mobilefacenet.onnx ]; then
-    echo "Models not found. Downloading..."
-    if [ ! -f scripts/download_models.sh ]; then
-        echo -e "${RED}✗ Download script not found at scripts/download_models.sh${NC}"
-        exit 1
-    fi
-    sudo -u "$ACTUAL_USER" bash scripts/download_models.sh
+if [ ! -f scripts/download_models.sh ]; then
+    echo -e "${RED}✗ Download script not found at scripts/download_models.sh${NC}"
+    exit 1
 fi
+
+# Always download to ensure we have the latest models
+sudo -u "$ACTUAL_USER" bash scripts/download_models.sh
 
 mkdir -p /usr/share/nihao/models
 cp -L models/scrfd_500m.onnx /usr/share/nihao/models/
