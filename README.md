@@ -23,7 +23,29 @@ Fast facial authentication for Linux using PAM. Written in Rust.
 
 ## Quick Start
 
-### 1. Install Dependencies
+### Automated Installation
+
+Run the install script to set up everything automatically:
+
+```bash
+sudo ./install.sh
+```
+
+This will:
+1. Build the project
+2. Download and install models to `/usr/share/nihao/models/`
+3. Create system config at `/etc/nihao/nihao.toml`
+4. Install PAM module and CLI binary
+5. Configure PAM for system-wide authentication
+6. Guide you through face enrollment
+
+**To uninstall:** `sudo ./uninstall.sh`
+
+### Manual Installation
+
+If you prefer to install manually or understand each step:
+
+#### 1. Install Dependencies
 
 ```bash
 # Arch Linux
@@ -254,6 +276,22 @@ When you run `sudo`:
 - Password fallback always works
 - All attempts logged to syslog
 - No network access - 100% local
+
+## Uninstall
+
+To remove NiHao from your system:
+
+```bash
+sudo ./uninstall.sh
+```
+
+This will:
+- Remove PAM configuration (safely comments out instead of deleting)
+- Remove PAM module: `/lib/security/pam_nihao.so`
+- Remove CLI binary: `/usr/local/bin/nihao`
+- Optionally remove models, config, and face data (with confirmation)
+
+After uninstall, password authentication works normally. To reinstall, run `sudo ./install.sh`.
 
 ## Troubleshooting
 
