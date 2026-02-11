@@ -1,295 +1,273 @@
 # 你好 NiHao
 
-Facial authentication for Linux. Written in Rust. No Python, no dlib, no nonsense.
+Fast facial authentication for Linux using PAM. Written in Rust.
 
-NiHao is a PAM-based facial recognition system that authenticates users via IR or standard camera, powered by ONNX Runtime. Designed from the ground up for AMD GPUs via ROCm, but works on CPU and NVIDIA too.
+**Performance:** 0.7-1.2 seconds authentication time (CPU-only)
 
-Think [Howdy](https://github.com/boltgolt/howdy), but rewritten as a single native binary with sub-50ms auth times instead of spawning a Python interpreter on every `sudo`.
+## Features
 
-## How it works
+- 🔒 **PAM Integration** - Works with sudo, login, GDM, SDDM, etc.
+- 🎥 **IR Camera Support** - Optimized for infrared cameras
+- ⚡ **Fast** - Sub-second authentication after first model load
+- 🦀 **Native Code** - No Python interpreter overhead
+- 🛡️ **Safe Fallback** - Password always works if face recognition fails
+- 📦 **Simple** - Single binary + PAM module
 
-1. PAM triggers `pam_nihao.so` during authentication
-2. V4L2 grabs a frame from your IR/RGB camera
-3. SCRFD detects faces in the frame (~10ms)
-4. ArcFace generates a 512-d embedding of the detected face (~5ms)
-5. Cosine similarity is computed against enrolled face embeddings
-6. PAM returns success or falls through to password
+## How It Works
 
-No daemon. No IPC. No subprocess. One shared library, loaded by PAM, does everything.
+1. You run `sudo` → PAM loads `/lib/security/pam_nihao.so`
+2. Camera captures frame → SCRFD detects face (~10ms)
+3. ArcFace generates 512-d embedding (~5ms)
+4. Compare with enrolled faces → Grant/deny access
+5. Falls back to password if face auth fails
 
-## Project structure
+## Quick Start
 
-```
-nihao/
-├── Cargo.toml
-├── README.md
-├── LICENSE
-├── config/
-│   └── nihao.toml              # default config
-├── models/
-│   ├── scrfd_500m.onnx         # face detection (< 3MB)
-│   └── arcface_mbf.onnx        # face embedding (< 70MB)
-├── nihao-core/                 # shared logic
-│   ├── Cargo.toml
-│   ├── src/
-│   │   ├── lib.rs
-│   │   ├── capture.rs          # V4L2 camera interface
-│   │   ├── detect.rs           # SCRFD face detection via ONNX Runtime
-│   │   ├── embed.rs            # ArcFace face embedding via ONNX Runtime
-│   │   ├── compare.rs          # cosine similarity + threshold logic
-│   │   ├── align.rs            # face alignment / preprocessing
-│   │   ├── store.rs            # enrolled face DB (embeddings on disk)
-│   │   └── config.rs           # TOML config loading
-├── nihao-cli/                  # CLI tool
-│   ├── Cargo.toml
-│   ├── src/
-│   │   └── main.rs
-│   │   └── commands/
-│   │       ├── mod.rs
-│   │       ├── add.rs          # enroll a face
-│   │       ├── remove.rs       # remove a face model
-│   │       ├── list.rs         # list enrolled faces
-│   │       ├── test.rs         # test camera + recognition
-│   │       ├── snapshot.rs     # dump a camera frame
-│   │       └── config.rs       # print/edit config
-├── pam-nihao/                  # PAM module (.so)
-│   ├── Cargo.toml
-│   ├── src/
-│   │   └── lib.rs              # extern "C" pam_sm_authenticate
-```
-
-## Dependencies
-
-### Build
-
-- Rust 1.75+ (2024 edition)
-- pkg-config
-- PAM headers (`pam` — included in base on Arch/CachyOS)
-- V4L2 headers (`v4l-utils`)
-- ONNX Runtime 1.17+ with ROCm execution provider (or CPU/CUDA)
-
-### Runtime
-
-- ONNX Runtime shared library
-- A compatible camera (IR preferred, RGB works)
-- SCRFD + ArcFace ONNX models (see [Models](#models))
-
-## Building
+### 1. Install Dependencies
 
 ```bash
-# install system deps (Arch/CachyOS)
-sudo pacman -S pam v4l-utils pkgconf
+# Arch Linux
+sudo pacman -S rust onnxruntime-cpu v4l-utils
 
-# clone
-git clone https://github.com/johnnytshi/nihao
-cd nihao
+# Ubuntu/Debian
+sudo apt install rustc cargo libonnxruntime v4l-utils libpam0g-dev
 
-# build everything
+# Fedora
+sudo dnf install rust cargo onnxruntime v4l-utils pam-devel
+```
+
+### 2. Download Models
+
+```bash
+./scripts/download_models.sh
+```
+
+Downloads SCRFD (face detection) and ArcFace (embedding) models to `models/`.
+
+### 3. Build
+
+```bash
 cargo build --release
-
-# outputs:
-#   target/release/nihao           <- CLI binary
-#   target/release/libpam_nihao.so <- PAM module
 ```
 
-### ROCm support
-
-If you have ONNX Runtime built with ROCm (e.g. on a Strix Halo or RDNA3 GPU):
+### 4. Enroll Your Face
 
 ```bash
-# point to your ONNX Runtime install
-export ORT_LIB_LOCATION=/path/to/onnxruntime
-export ORT_USE_ROCM=1
-
-cargo build --release --features rocm
+./nihao.sh add
+./nihao.sh test  # Verify it works
 ```
 
-### CPU-only
+Faces are stored in `/var/lib/nihao/faces/`.
 
-Works out of the box — ONNX Runtime defaults to CPU execution provider. Slower but requires no GPU stack.
-
-## Installation
+### 5. Install PAM Module
 
 ```bash
-# install the CLI
-sudo install -m 755 target/release/nihao /usr/local/bin/
+# Install PAM module
+sudo cp target/release/libpam_nihao.so /lib/security/pam_nihao.so
+sudo chmod 755 /lib/security/pam_nihao.so
 
-# install the PAM module
-sudo install -m 644 target/release/libpam_nihao.so /usr/lib/security/pam_nihao.so
-
-# install default config
-sudo mkdir -p /etc/nihao
-sudo install -m 644 config/nihao.toml /etc/nihao/nihao.toml
-
-# install models
-sudo mkdir -p /usr/share/nihao/models
-sudo install -m 644 models/*.onnx /usr/share/nihao/models/
-
-# create face storage directory
-sudo mkdir -p /var/lib/nihao/faces
+# Configure PAM for sudo
+sudo nano /etc/pam.d/sudo
 ```
 
-Optionally, a PKGBUILD will be provided for clean `makepkg` / AUR installation.
+Add this line at the **top** (before other auth lines):
 
-## PAM configuration
+```
+auth sufficient pam_nihao.so
+```
 
-Add NiHao to the PAM service you want facial auth on. For example, to enable it for `sudo`:
+Save and exit. Now test:
 
 ```bash
-# /etc/pam.d/sudo
-# add this BEFORE the existing @include or auth lines:
-auth  sufficient  pam_nihao.so
+sudo echo "Testing face auth..."
 ```
 
-`sufficient` means: if the face matches, auth succeeds. If it fails (no face, no match, camera error), it falls through to your password prompt. Nothing breaks.
-
-Other services: `/etc/pam.d/login`, `/etc/pam.d/gdm-password`, `/etc/pam.d/sddm`, etc.
-
-## Usage
-
-### Enroll a face
-
-```bash
-sudo nihao add
-# or with a label
-sudo nihao add --label "with glasses"
-```
-
-### List enrolled faces
-
-```bash
-sudo nihao list
-```
-
-### Remove a face
-
-```bash
-sudo nihao remove <id>
-# or remove all
-sudo nihao clear
-```
-
-### Test recognition
-
-```bash
-sudo nihao test
-```
-
-### Take a camera snapshot
-
-```bash
-sudo nihao snapshot --output frame.png
-```
+Your camera should activate and authenticate you in ~1 second! If face auth fails, you'll get a password prompt (fallback always works).
 
 ## Configuration
 
-Config lives at `/etc/nihao/nihao.toml`:
+Config file: `~/.config/nihao/nihao.toml` or `/etc/nihao/nihao.toml`
 
 ```toml
 [camera]
-# V4L2 device path
-device = "/dev/video0"
-# prefer IR camera if available
-prefer_ir = true
-# frame dimensions
+device = "/dev/video2"           # IR camera device
 width = 640
 height = 480
+detection_scale = 0.5            # Use 320x240 for detection (4x faster)
+dark_threshold = 80.0            # Filter bad IR frames
 
 [detection]
-# SCRFD model path
-model = "/usr/share/nihao/models/scrfd_500m.onnx"
-# minimum confidence for face detection
-confidence = 0.5
+model_path = "models/scrfd_500m.onnx"
+confidence_threshold = 0.5
 
 [embedding]
-# ArcFace model path
-model = "/usr/share/nihao/models/arcface_mbf.onnx"
+model_path = "models/arcface_mobilefacenet.onnx"
 
 [matching]
-# cosine similarity threshold (higher = stricter)
-# 0.4 is a good default, increase to 0.5+ for tighter security
-threshold = 0.4
-# maximum number of frames to try before giving up
-max_frames = 5
-# timeout in milliseconds
-timeout = 3000
+threshold = 0.4                  # Cosine similarity threshold
+max_frames = 10
+timeout_secs = 4
 
-[runtime]
-# ONNX Runtime execution provider: "cpu", "rocm", "cuda"
-provider = "rocm"
-# GPU device ID (for multi-GPU systems)
-device_id = 0
+[storage]
+database_path = "/var/lib/nihao/faces"
+
+[debug]
+save_screenshots = false
+output_dir = "~/.cache/nihao/debug"
+```
+
+## Usage
+
+```bash
+./nihao.sh add              # Enroll your face
+./nihao.sh add "with glasses"  # Enroll with label
+./nihao.sh test             # Test authentication
+./nihao.sh list             # List enrolled faces
+./nihao.sh remove face_0    # Remove a face
+./nihao.sh snapshot test.jpg   # Capture camera frame
+```
+
+## How PAM Authentication Works
+
+When you run `sudo`:
+
+```
+1. sudo sets environment variables:
+   SUDO_USER=johnny (the real user)
+   PAM_USER=root (target user - ignored)
+
+2. PAM loads pam_nihao.so
+
+3. Module reads SUDO_USER → "johnny"
+
+4. Loads faces from /var/lib/nihao/faces/johnny/
+
+5. Authenticates face → SUCCESS or FAIL
+
+6. On SUCCESS: sudo grants access (no password!)
+   On FAIL: Falls through to password prompt
+```
+
+**Security:**
+- Authenticates the **invoking user** (you), not the target user (root)
+- Password fallback always works
+- All attempts logged to syslog
+- No network access - 100% local
+
+## Troubleshooting
+
+### "Failed to load ONNX Runtime"
+
+Install system ONNX Runtime:
+
+```bash
+sudo pacman -S onnxruntime-cpu  # Arch
+sudo apt install libonnxruntime  # Ubuntu
+sudo dnf install onnxruntime     # Fedora
+```
+
+### "No enrolled faces"
+
+Enroll your face first:
+
+```bash
+./nihao.sh add
+./nihao.sh list  # Verify it saved
+```
+
+### "Camera not found"
+
+Check your camera device:
+
+```bash
+ls -la /dev/video*
+v4l2-ctl --list-devices
+```
+
+Update config to point to your camera (usually `/dev/video0` or `/dev/video2`).
+
+### Getting Locked Out
+
+You can't get locked out! The PAM config uses `sufficient`, meaning:
+- ✅ Face succeeds → Authentication complete
+- ❌ Face fails → Continue to password prompt
+
+To disable face auth temporarily, edit `/etc/pam.d/sudo` and comment out the `pam_nihao.so` line with `#`.
+
+## Performance
+
+**Tested on AMD Ryzen with IR camera at 640x480:**
+
+- First auth (cold start): ~3-4 seconds (model loading)
+- Subsequent auths: 0.7-1.2 seconds
+- Detection: ~10ms at 320x240
+- Embedding: ~5ms
+- CPU usage: Single core, brief spike
+
+**Optimizations:**
+- Uses half-resolution (320x240) for detection (4x faster)
+- Models cached in memory after first load
+- No preprocessing needed for good IR cameras
+- Single-camera, IR-only configuration
+
+## Architecture
+
+```
+nihao/
+├── nihao-core/          # Shared library
+│   ├── capture.rs       # V4L2 camera
+│   ├── detect.rs        # SCRFD face detection
+│   ├── embed.rs         # ArcFace embedding
+│   ├── align.rs         # Face alignment
+│   ├── compare.rs       # Similarity matching
+│   └── store.rs         # Face database
+├── nihao-cli/           # CLI tool
+│   └── main.rs
+├── pam-nihao/           # PAM module
+│   └── lib.rs           # pam_sm_authenticate()
+└── nihao.sh             # Wrapper script
 ```
 
 ## Models
 
-NiHao uses two small ONNX models:
+| Model | Purpose | Size |
+|-------|---------|------|
+| SCRFD-500M | Face detection | ~2.5 MB |
+| ArcFace MobileFaceNet | Face embedding | ~65 MB |
 
-| Model | Purpose | Size | Output |
-|-------|---------|------|--------|
-| [SCRFD_500M](https://github.com/deepinsight/insightface/tree/master/detection/scrfd) | Face detection | ~2.5 MB | Bounding boxes + landmarks |
-| [ArcFace MobileFaceNet](https://github.com/deepinsight/insightface/tree/master/recognition/arcface) | Face embedding | ~65 MB | 512-d float vector |
+Both from [InsightFace](https://github.com/deepinsight/insightface) (Apache 2.0 license).
 
-Both are from InsightFace and are available under permissive licenses. Download them:
+## Design Decisions
 
-```bash
-# TODO: provide a download script or host mirrors
-./scripts/download_models.sh
-```
+**Why not Howdy?**
+Howdy spawns Python on every auth (~500ms overhead). NiHao is a native `.so` loaded once by PAM.
 
-## Key crates
+**Why ONNX Runtime?**
+Smaller, faster, and more portable than PyTorch. Works everywhere.
 
-| Crate | Purpose |
-|-------|---------|
-| [`ort`](https://crates.io/crates/ort) | ONNX Runtime bindings |
-| [`v4l`](https://crates.io/crates/v4l) | V4L2 camera capture |
-| [`image`](https://crates.io/crates/image) | Image decoding / resizing |
-| [`clap`](https://crates.io/crates/clap) | CLI argument parsing |
-| [`toml`](https://crates.io/crates/toml) / [`serde`](https://crates.io/crates/serde) | Config parsing |
-| [`bincode`](https://crates.io/crates/bincode) | Fast serialization for face embeddings |
+**Why CPU-only?**
+Testing showed CPU is 10-12% **faster** than GPU for these small models. GPU has overhead for small batches.
 
-## Design decisions
+**Why V4L2 directly?**
+We need one frame from a camera. V4L2 does this with zero dependencies. OpenCV is overkill.
 
-**Why not fork Howdy?**
-Howdy spawns a Python process on every auth attempt. Python startup + dlib import + model load = 500ms+ before anything useful happens. NiHao is a single `.so` loaded into the PAM process — model loading happens once, inference is immediate.
-
-**Why ONNX Runtime instead of libtorch?**
-Smaller runtime footprint, faster cold start, and the C API is stable. PyTorch's runtime pulls in hundreds of megabytes. ONNX Runtime with ROCm is ~50MB. For a PAM module that needs to be fast and light, this matters.
-
-**Why not MIOpen directly?**
-MIOpen is a primitives library. Writing inference against it directly means manually implementing the entire network forward pass. ONNX Runtime already calls MIOpen under the hood on ROCm — same performance, fraction of the code.
-
-**Why ArcFace over dlib's ResNet?**
-ArcFace (MobileFaceNet backbone) is both faster and more accurate than dlib's face recognition model. It produces 512-d embeddings with better discriminative power, and the ONNX export is widely available and well-tested.
-
-**Why V4L2 instead of OpenCV?**
-We need exactly one thing from the camera: a single frame in a known format. V4L2 does this directly with zero overhead. OpenCV brings in a massive dependency tree for functionality we don't use.
+**Why Rust?**
+Memory safety, no GC pauses, and excellent crate ecosystem. Perfect for security-critical code.
 
 ## Comparison with Howdy
 
 | | Howdy | NiHao |
 |---|---|---|
-| Language | Python + C++ (PAM) | Rust |
-| Auth latency | 500ms+ (Python cold start) | < 50ms |
-| Face detection | dlib HOG or CNN | SCRFD (ONNX) |
-| Face embedding | dlib ResNet | ArcFace MobileFaceNet (ONNX) |
-| GPU support | NVIDIA only (via cuDNN) | AMD ROCm, NVIDIA CUDA, CPU |
-| Runtime deps | Python, dlib, OpenCV, numpy | ONNX Runtime |
-| Architecture | PAM → subprocess → Python | PAM → native .so |
+| Language | Python + C++ | Rust |
+| Auth latency | 500ms+ | 0.7-1.2s |
+| First-time latency | 1-2s | 3-4s |
+| Runtime | Python, dlib, OpenCV | ONNX Runtime only |
+| Architecture | PAM → subprocess | PAM → native .so |
+| GPU support | NVIDIA | Not needed (CPU is faster) |
 
-## Roadmap
+## Contributing
 
-- [ ] Core detection + embedding pipeline
-- [ ] PAM module with V4L2 capture
-- [ ] CLI: add, remove, list, test
-- [ ] ROCm execution provider integration
-- [ ] Multi-face enrollment per user
-- [ ] IR camera detection + preference
-- [ ] Anti-spoofing (liveness detection)
-- [ ] Systemd integration for model preloading
-- [ ] Wayland-compatible notification (face recognized/failed)
-- [ ] PKGBUILD for Arch/CachyOS (AUR)
-- [ ] Package for Debian, Fedora
+See `CLEANUP_SUMMARY.md` for details on the optimized codebase (766 lines of unused features removed).
 
 ## License
 
@@ -297,6 +275,6 @@ MIT
 
 ## Acknowledgments
 
-- [Howdy](https://github.com/boltgolt/howdy) for proving the concept and PAM integration approach
-- [InsightFace](https://github.com/deepinsight/insightface) for SCRFD and ArcFace models
-- [ONNX Runtime](https://onnxruntime.ai/) for the inference backbone
+- [Howdy](https://github.com/boltgolt/howdy) - Inspiration and PAM approach
+- [InsightFace](https://github.com/deepinsight/insightface) - SCRFD and ArcFace models
+- [ONNX Runtime](https://onnxruntime.ai/) - Inference engine

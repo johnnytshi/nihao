@@ -51,8 +51,10 @@ impl PamServiceModule for PamNihao {
 /// Internal authentication implementation
 /// This is separate to allow catch_unwind to work properly
 fn authenticate_impl(_pamh: &Pam) -> Result<(), String> {
-    // Get username from PAM - access environment variable
-    let user = std::env::var("PAM_USER")
+    // Get the actual invoking user, not the target user
+    // For sudo: SUDO_USER contains the real user, PAM_USER contains "root"
+    let user = std::env::var("SUDO_USER")
+        .or_else(|_| std::env::var("PAM_RUSER"))
         .or_else(|_| std::env::var("USER"))
         .map_err(|e| format!("Failed to get username: {:?}", e))?;
 

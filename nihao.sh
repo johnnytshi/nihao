@@ -1,8 +1,8 @@
 #!/bin/bash
 # NiHao Face Recognition - Convenience Wrapper Script
 
-# Set up ONNX Runtime environment
-export LD_LIBRARY_PATH="/home/johnny/amd/onnxruntime/build/Linux/Release:$LD_LIBRARY_PATH"
+# ONNX Runtime is installed system-wide via package manager
+# No need to set LD_LIBRARY_PATH
 
 # Enable debug logging by default (can be overridden)
 export RUST_LOG="${RUST_LOG:-info}"
