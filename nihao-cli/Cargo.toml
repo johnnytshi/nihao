@@ -12,6 +12,7 @@ clap.workspace = true
 anyhow.workspace = true
 env_logger.workspace = true
 log.workspace = true
+rpassword.workspace = true
 
 [[bin]]
 name = "nihao"

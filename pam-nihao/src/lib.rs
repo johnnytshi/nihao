@@ -1,6 +1,7 @@
 use lazy_static::lazy_static;
-use nihao_core::{config::Config, FaceRecognizer};
-use pamsm::{Pam, PamError, PamFlag, PamServiceModule};
+use nihao_core::{config::Config, password::PasswordStore, FaceRecognizer};
+use pamsm::{Pam, PamError, PamFlag, PamLibExt, PamServiceModule};
+use std::ffi::CString;
 use std::panic;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -16,7 +17,13 @@ struct PamNihao;
 impl PamServiceModule for PamNihao {
     fn authenticate(pamh: Pam, _flags: PamFlag, _args: Vec<String>) -> PamError {
         // Initialize syslog (ignore errors)
-        let _ = syslog::init_unix(syslog::Facility::LOG_AUTH, log::LevelFilter::Info);
+        // Use Warn level in release builds to reduce log noise
+        #[cfg(debug_assertions)]
+        let log_level = log::LevelFilter::Info;
+        #[cfg(not(debug_assertions))]
+        let log_level = log::LevelFilter::Warn;
+
+        let _ = syslog::init_unix(syslog::Facility::LOG_AUTH, log_level);
 
         // CRITICAL: Wrap everything in catch_unwind to prevent panics from crossing FFI boundary
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
@@ -50,7 +57,10 @@ impl PamServiceModule for PamNihao {
 
 /// Internal authentication implementation
 /// This is separate to allow catch_unwind to work properly
-fn authenticate_impl(_pamh: &Pam) -> Result<(), String> {
+fn authenticate_impl(pamh: &Pam) -> Result<(), String> {
+    // NOTE: We don't redirect stdout/stderr because it affects the calling process
+    // Instead, we ensure zero prints in our code (verified by audit) and use syslog only
+
     // Get the actual invoking user, not the target user
     // For sudo: SUDO_USER contains the real user, PAM_USER contains "root"
     let user = std::env::var("SUDO_USER")
@@ -100,6 +110,40 @@ fn authenticate_impl(_pamh: &Pam) -> Result<(), String> {
     match auth_result {
         Ok(true) => {
             log::info!("NiHao: Face recognized for user: {}", user);
+
+            // Try to set PAM_AUTHTOK for automatic service unlock (KWallet, GNOME Keyring, etc.)
+            let password_store = PasswordStore::new("/etc/nihao");
+            if password_store.has_password(&user) {
+                match password_store.load_password(&user) {
+                    Ok(password) => {
+                        // Convert password to CString for PAM
+                        match CString::new(password) {
+                            Ok(c_password) => {
+                                // Set PAM_AUTHTOK
+                                match pamh.set_authtok(&c_password) {
+                                    Ok(_) => {
+                                        log::info!("NiHao: PAM_AUTHTOK set successfully for service unlock");
+                                    }
+                                    Err(e) => {
+                                        log::warn!("NiHao: Failed to set PAM_AUTHTOK: {:?}", e);
+                                        // Don't fail auth if we can't set the token
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("NiHao: Failed to convert password to CString: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("NiHao: Failed to load stored password: {}", e);
+                        // Don't fail auth if we can't load the password
+                    }
+                }
+            } else {
+                log::debug!("NiHao: No stored password for user {}, services won't auto-unlock", user);
+            }
+
             Ok(())
         }
         Ok(false) => {

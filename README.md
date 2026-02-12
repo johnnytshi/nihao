@@ -199,6 +199,7 @@ After installation, files are organized as follows:
 | **Models** | `/usr/share/nihao/models/*.onnx` | Face detection & embedding models |
 | **Config** | `/etc/nihao/nihao.toml` | System-wide configuration |
 | **Faces** | `/var/lib/nihao/faces/` | Enrolled face embeddings per user |
+| **Passwords** | `/etc/nihao/*.key` | Encrypted passwords for service unlock (optional) |
 | **PAM Module** | `/lib/security/pam_nihao.so` | PAM authentication module |
 | **CLI Binary** | `/usr/local/bin/nihao` (optional) | Command-line tool |
 | **PAM Config** | `/etc/pam.d/system-auth` | PAM configuration |
@@ -249,6 +250,69 @@ output_dir = "~/.cache/nihao/debug"
 ./nihao.sh remove face_0    # Remove a face
 ./nihao.sh snapshot test.jpg   # Capture camera frame
 ```
+
+## Automatic Service Unlock
+
+NiHao can automatically unlock keyrings and encrypted services when you authenticate with your face, eliminating the need to manually enter your password after face authentication succeeds.
+
+### How It Works
+
+When face authentication succeeds, NiHao decrypts your stored password and sets `PAM_AUTHTOK`, which allows other PAM modules to automatically unlock their services without prompting:
+
+- **KDE Wallet (KWallet5/6)** - via `pam_kwallet5.so`
+- **GNOME Keyring** - via `pam_gnome_keyring.so`
+- **Encrypted home directories** - via `pam_ecryptfs.so`
+- **Encrypted volumes** - via `pam_mount.so`
+- Any other PAM module that reads `PAM_AUTHTOK`
+
+This uses standard PAM token passing mechanisms - no D-Bus complexity needed.
+
+### Setup
+
+1. **Store your login password** (encrypted with AES-256-GCM):
+   ```bash
+   sudo nihao store-password
+   ```
+
+2. **Verify it's stored**:
+   ```bash
+   sudo nihao check-password
+   ```
+
+3. **Configure PAM** to pass the token to other modules:
+
+   Edit `/etc/pam.d/system-auth` and update the `pam_nihao.so` line to use stackable flags:
+
+   ```
+   auth       [success=ok default=ignore] pam_nihao.so
+   auth       optional                    pam_kwallet5.so
+   auth       required                    pam_unix.so
+   ```
+
+   This ensures:
+   - If face auth succeeds → sets `PAM_AUTHTOK` and continues to `pam_kwallet5`
+   - `pam_kwallet5` reads `PAM_AUTHTOK` and unlocks KWallet automatically
+   - If face fails → falls through to password prompt (`pam_unix`)
+
+4. **Test it**: Lock your screen and unlock with your face - services should unlock automatically!
+
+### Security Notes
+
+- Password is encrypted with **AES-256-GCM**
+- Encryption key derived from `/etc/machine-id` (unique per machine)
+- Stored in `/etc/nihao/{username}.key` with `0600` permissions (owner read/write only)
+- Only accessible by root (PAM runs as root during authentication)
+- Same security model as fingerprint reader implementations
+
+### Disable Auto-Unlock
+
+To disable automatic service unlock while keeping face authentication:
+
+```bash
+sudo nihao remove-password
+```
+
+Face authentication will still work, but you'll need to manually enter your password for services.
 
 ## How PAM Authentication Works
 
@@ -327,11 +391,67 @@ Update config to point to your camera (usually `/dev/video0` or `/dev/video2`).
 
 ### Getting Locked Out
 
-You can't get locked out! The PAM config uses `sufficient`, meaning:
+You can't get locked out! The PAM config uses `[success=ok default=ignore]`, meaning:
 - ✅ Face succeeds → Authentication complete
 - ❌ Face fails → Continue to password prompt
 
-To disable face auth temporarily, edit `/etc/pam.d/sudo` and comment out the `pam_nihao.so` line with `#`.
+To disable face auth temporarily, edit `/etc/pam.d/system-auth` and comment out the `pam_nihao.so` line with `#`.
+
+### KWallet Still Prompts for Password
+
+If KWallet still asks for a password after face authentication:
+
+**1. Check if kwallet-pam is installed:**
+```bash
+sudo pacman -S kwallet-pam  # Arch Linux
+sudo apt install libpam-kwallet5  # Ubuntu/Debian
+```
+
+**2. Verify PAM module location:**
+```bash
+find /lib /usr/lib -name "pam_kwallet*.so"
+```
+
+If the module is in `/usr/lib/security/`, PAM should find it automatically.
+
+**3. Check if your KWallet password matches your login password:**
+
+KWallet must be created with your **login password** (same as your face auth stored password) for PAM integration to work. If you used a different password when creating KWallet, you need to recreate it:
+
+```bash
+# Backup existing wallet
+mkdir -p ~/kwallet-backup
+cp ~/.local/share/kwalletd/kdewallet.* ~/kwallet-backup/
+
+# Remove old wallet (it will be recreated)
+rm ~/.local/share/kwalletd/kdewallet.*
+
+# Lock and unlock - use your LOGIN PASSWORD when prompted
+loginctl lock-session
+# Unlock with face → KWallet will prompt → Use your LOGIN password
+```
+
+**4. Verify PAM_AUTHTOK is being set:**
+```bash
+# Enable verbose logging temporarily
+sudo journalctl -t sudo -f &
+
+# Test face auth
+sudo -k
+sudo echo "test"
+
+# Look for: "NiHao: PAM_AUTHTOK set successfully"
+```
+
+**5. Check PAM configuration order:**
+
+Ensure `pam_kwallet5.so` comes **after** `pam_unix.so` in `/etc/pam.d/system-auth`:
+```
+auth       [success=ok default=ignore] pam_nihao.so
+auth       [success=1 default=bad]     pam_unix.so try_first_pass nullok
+...
+auth       optional                    pam_kwallet5.so  # ← Must be after pam_unix
+```
 
 ## Performance
 

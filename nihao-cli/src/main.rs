@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use nihao_core::{config::Config, FaceRecognizer};
+use nihao_core::{config::Config, password::PasswordStore, FaceRecognizer};
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -59,6 +59,21 @@ enum Commands {
         #[arg(long)]
         validate: bool,
     },
+    /// Store your login password for automatic service unlock (KWallet, GNOME Keyring, etc.)
+    StorePassword {
+        /// Username to store password for (defaults to current user)
+        username: Option<String>,
+    },
+    /// Remove stored password
+    RemovePassword {
+        /// Username to remove password for (defaults to current user)
+        username: Option<String>,
+    },
+    /// Check if password is stored
+    CheckPassword {
+        /// Username to check (defaults to current user)
+        username: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -76,6 +91,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Test { username, timing } => cmd_test(username, timing),
         Commands::Snapshot { output } => cmd_snapshot(output),
         Commands::Config { validate } => cmd_config(validate),
+        Commands::StorePassword { username } => cmd_store_password(username),
+        Commands::RemovePassword { username } => cmd_remove_password(username),
+        Commands::CheckPassword { username } => cmd_check_password(username),
     }
 }
 
@@ -244,6 +262,119 @@ fn cmd_config(validate: bool) -> anyhow::Result<()> {
     println!("[debug]");
     println!("  save_screenshots = {}", config.debug.save_screenshots);
     println!("  output_dir = {:?}", config.debug.output_dir);
+
+    Ok(())
+}
+
+fn cmd_store_password(username: Option<String>) -> anyhow::Result<()> {
+    let username = username.unwrap_or_else(|| {
+        // Get the actual user (not root when using sudo)
+        std::env::var("SUDO_USER")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| {
+                eprintln!("Error: Could not determine current user");
+                std::process::exit(1);
+            })
+    });
+
+    println!("Storing password for user: {}", username);
+    println!();
+    println!("This will encrypt and store your login password to enable automatic");
+    println!("unlock of keyrings and encrypted services (KWallet, GNOME Keyring, etc.)");
+    println!();
+
+    // Read password securely
+    let password = rpassword::prompt_password("Enter your login password: ")?;
+
+    if password.is_empty() {
+        anyhow::bail!("Password cannot be empty");
+    }
+
+    // Confirm password
+    let password_confirm = rpassword::prompt_password("Confirm password: ")?;
+
+    if password != password_confirm {
+        anyhow::bail!("Passwords do not match");
+    }
+
+    // Store password
+    let store = PasswordStore::new("/etc/nihao");
+    store.store_password(&username, &password)?;
+
+    println!();
+    println!("✓ Password stored successfully!");
+    println!();
+    println!("Your password is encrypted with AES-256-GCM and stored in:");
+    println!("  /etc/nihao/{}.key", username);
+    println!();
+    println!("Next time you authenticate with your face, keyrings and services will");
+    println!("unlock automatically without requiring password entry.");
+
+    Ok(())
+}
+
+fn cmd_remove_password(username: Option<String>) -> anyhow::Result<()> {
+    let username = username.unwrap_or_else(|| {
+        // Get the actual user (not root when using sudo)
+        std::env::var("SUDO_USER")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| {
+                eprintln!("Error: Could not determine current user");
+                std::process::exit(1);
+            })
+    });
+
+    println!("Removing stored password for user: {}", username);
+
+    let store = PasswordStore::new("/etc/nihao");
+    store.remove_password(&username)?;
+
+    println!("✓ Password removed successfully");
+    println!();
+    println!("Face authentication will still work, but services (KWallet, GNOME Keyring)");
+    println!("will no longer unlock automatically.");
+
+    Ok(())
+}
+
+fn cmd_check_password(username: Option<String>) -> anyhow::Result<()> {
+    let username = username.unwrap_or_else(|| {
+        // Get the actual user (not root when using sudo)
+        std::env::var("SUDO_USER")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| {
+                eprintln!("Error: Could not determine current user");
+                std::process::exit(1);
+            })
+    });
+
+    let store = PasswordStore::new("/etc/nihao");
+
+    if store.has_password(&username) {
+        println!("✓ Password is stored for user: {}", username);
+        println!();
+        println!("Location: /etc/nihao/{}.key", username);
+        println!();
+        println!("When you authenticate with your face, keyrings and services will");
+        println!("unlock automatically.");
+
+        // Check file permissions
+        let path = format!("/etc/nihao/{}.key", username);
+        if let Ok(metadata) = std::fs::metadata(&path) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = metadata.permissions().mode();
+                let octal = format!("{:o}", mode & 0o777);
+                println!("File permissions: {}", octal);
+            }
+        }
+    } else {
+        println!("✗ No password stored for user: {}", username);
+        println!();
+        println!("To enable automatic service unlock, run:");
+        println!("  sudo nihao store-password");
+    }
 
     Ok(())
 }

@@ -204,7 +204,20 @@ echo
 echo "2. Test authentication:"
 echo "   sudo -u $ACTUAL_USER nihao test"
 echo
-echo "3. Try sudo with face auth:"
+echo "3. (Optional) Enable automatic service unlock:"
+echo "   This allows KWallet, GNOME Keyring, and other services to unlock"
+echo "   automatically when you authenticate with your face."
+echo
+read -p "   Would you like to set this up now? (y/N) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    echo
+    echo "   Storing your password for automatic service unlock..."
+    sudo -u "$ACTUAL_USER" nihao store-password || echo -e "${YELLOW}   ⚠ Password storage skipped or failed${NC}"
+    echo
+fi
+echo
+echo "4. Try sudo with face auth:"
 echo "   sudo -k  # Clear credential cache"
 echo "   sudo echo 'Testing face auth...'"
 echo

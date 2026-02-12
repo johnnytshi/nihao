@@ -4,6 +4,7 @@ pub mod compare;
 pub mod config;
 pub mod detect;
 pub mod embed;
+pub mod password;
 pub mod runtime;
 pub mod store;
 

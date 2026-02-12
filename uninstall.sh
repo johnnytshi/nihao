@@ -28,6 +28,7 @@ echo
 echo "The following will be KEPT (delete manually if needed):"
 echo "  - Models: /usr/share/nihao/models/"
 echo "  - Config: /etc/nihao/nihao.toml"
+echo "  - Stored passwords: /etc/nihao/*.key (if any)"
 echo "  - Face data: /var/lib/nihao/faces/"
 echo
 
@@ -89,6 +90,15 @@ if [ -d /usr/share/nihao ]; then
     rm -rf /usr/share/nihao && echo -e "${GREEN}✓ Removed models ($MODEL_SIZE)${NC}"
 fi
 if [ -d /etc/nihao ]; then
+    # Check if there are password files
+    if ls /etc/nihao/*.key 1> /dev/null 2>&1; then
+        echo -e "${YELLOW}⚠ Found stored password files in /etc/nihao/${NC}"
+        read -p "Remove stored passwords? (y/N) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            rm -f /etc/nihao/*.key && echo -e "${GREEN}✓ Removed stored passwords${NC}"
+        fi
+    fi
     rm -rf /etc/nihao && echo -e "${GREEN}✓ Removed config${NC}"
 fi
 
