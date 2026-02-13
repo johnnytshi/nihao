@@ -23,7 +23,7 @@ echo
 echo "The following will be removed:"
 echo "  - PAM module: /lib/security/pam_nihao.so"
 echo "  - CLI binary: /usr/local/bin/nihao"
-echo "  - PAM configuration in /etc/pam.d/system-auth"
+echo "  - PAM configuration (restored from /etc/pam.d/system-auth.backup if available)"
 echo
 echo "The following will be KEPT (delete manually if needed):"
 echo "  - Models: /usr/share/nihao/models/"
@@ -41,13 +41,18 @@ fi
 
 echo
 
-# 1. Remove PAM configuration
-echo -e "${BLUE}[1/3] Removing PAM configuration...${NC}"
-if [ -f /etc/pam.d/system-auth ]; then
+# 1. Restore PAM configuration
+echo -e "${BLUE}[1/3] Restoring PAM configuration...${NC}"
+if [ -f /etc/pam.d/system-auth.backup ]; then
+    cp /etc/pam.d/system-auth.backup /etc/pam.d/system-auth
+    rm -f /etc/pam.d/system-auth.backup
+    echo -e "${GREEN}✓ Restored /etc/pam.d/system-auth from backup${NC}"
+elif [ -f /etc/pam.d/system-auth ]; then
     if grep -q "pam_nihao.so" /etc/pam.d/system-auth; then
-        # Comment out the line instead of removing (safer)
-        sed -i 's/^auth.*pam_nihao.so/#&/' /etc/pam.d/system-auth
-        echo -e "${GREEN}✓ PAM configuration disabled in /etc/pam.d/system-auth${NC}"
+        sed -i '/pam_nihao.so/d' /etc/pam.d/system-auth
+        echo -e "${GREEN}✓ Removed pam_nihao.so from /etc/pam.d/system-auth${NC}"
+        echo -e "${YELLOW}  (no backup found, removed nihao lines only)${NC}"
+        echo -e "${YELLOW}  If you used service unlock mode, kwallet5 lines may remain — verify manually${NC}"
     else
         echo -e "${YELLOW}⚠ PAM configuration not found in system-auth${NC}"
     fi
@@ -56,8 +61,8 @@ fi
 # Also check sudo config (in case user only enabled it there)
 if [ -f /etc/pam.d/sudo ]; then
     if grep -q "pam_nihao.so" /etc/pam.d/sudo; then
-        sed -i 's/^auth.*pam_nihao.so/#&/' /etc/pam.d/sudo
-        echo -e "${GREEN}✓ PAM configuration disabled in /etc/pam.d/sudo${NC}"
+        sed -i '/pam_nihao.so/d' /etc/pam.d/sudo
+        echo -e "${GREEN}✓ Removed pam_nihao.so from /etc/pam.d/sudo${NC}"
     fi
 fi
 
