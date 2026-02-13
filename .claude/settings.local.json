@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(chmod:*)",
+      "Bash(cargo build:*)",
+      "Bash(./target/release/nihao snapshot:*)",
+      "Bash(file:*)",
+      "Bash(wget:*)",
+      "Bash(unzip:*)",
+      "Bash(ls:*)",
+      "Bash(./target/release/nihao config:*)",
+      "Bash(ln:*)",
+      "Bash(ldconfig:*)",
+      "Bash(env RUST_LOG=info LD_LIBRARY_PATH=/home/johnny/amd/onnxruntime/build/Linux/Release:/home/johnny/amd/AMDMIGraphX/install/opt/rocm/lib:/home/johnny/amd/AMDMIGraphX/install/opt/rocm/lib/migraphx/lib ./target/release/nihao add:*)",
+      "Bash(./nihao.sh:*)",
+      "Bash(v4l2-ctl:*)",
+      "Bash(export LD_LIBRARY_PATH=/home/johnny/amd/onnxruntime/build/Linux/Release:/home/johnny/amd/AMDMIGraphX/install/opt/rocm/lib:/home/johnny/amd/AMDMIGraphX/install/opt/rocm/lib/migraphx/lib:$LD_LIBRARY_PATH)",
+      "Bash(cargo run:*)",
+      "Bash(xargs ls:*)",
+      "Bash(sort:*)",
+      "Bash(grep:*)",
+      "Bash(git checkout:*)",
+      "Bash(for i in {1..3})",
+      "Bash(do echo \"Attempt $i:\")",
+      "Bash(done)",
+      "Bash(RUST_LOG=debug,ort=error ./nihao.sh:*)",
+      "Bash(./target/release/nihao test:*)",
+      "Bash(for i in {1..5})",
+      "Bash(do echo \"Test $i:\")",
+      "Bash(wc:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.rs)",
+      "Bash(find:*)",
+      "WebFetch(domain:linux.die.net)"
+    ]
+  }
+}

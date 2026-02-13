@@ -97,13 +97,15 @@ echo -e "${GREEN}✓ Build complete${NC}"
 # 2. Download and install models
 echo -e "${BLUE}[2/7] Downloading and installing models...${NC}"
 
-if [ ! -f scripts/download_models.sh ]; then
-    echo -e "${RED}✗ Download script not found at scripts/download_models.sh${NC}"
-    exit 1
+if [ ! -f models/scrfd_500m.onnx ] || [ ! -f models/arcface_mobilefacenet.onnx ]; then
+    if [ -f scripts/download_models.sh ]; then
+        sudo -u "$ACTUAL_USER" bash scripts/download_models.sh
+    else
+        echo -e "${RED}✗ Models not found in models/ and no download script available${NC}"
+        echo "Please place scrfd_500m.onnx and arcface_mobilefacenet.onnx in the models/ directory"
+        exit 1
+    fi
 fi
-
-# Always download to ensure we have the latest models
-sudo -u "$ACTUAL_USER" bash scripts/download_models.sh
 
 mkdir -p /usr/share/nihao/models
 cp -L models/scrfd_500m.onnx /usr/share/nihao/models/
@@ -177,20 +179,47 @@ echo -e "${BLUE}[7/7] Configuring PAM...${NC}"
 if [ ! -f /etc/pam.d/system-auth ]; then
     echo -e "${YELLOW}⚠ /etc/pam.d/system-auth not found (might be different on your distro)${NC}"
     echo "You'll need to manually add this line to your PAM config:"
-    echo "auth       sufficient                  pam_nihao.so"
+    echo "  Option A: auth       sufficient                  pam_nihao.so"
+    echo "  Option B: auth       [success=ok default=ignore] pam_nihao.so"
+elif grep -q "pam_nihao.so" /etc/pam.d/system-auth; then
+    echo -e "${YELLOW}⚠ PAM configuration already exists${NC}"
 else
-    if grep -q "pam_nihao.so" /etc/pam.d/system-auth; then
-        echo -e "${YELLOW}⚠ PAM configuration already exists${NC}"
+    echo
+    echo "Choose PAM integration mode:"
+    echo
+    echo "  1) Simple  - Face auth for sudo/login only"
+    echo "     Uses 'sufficient': success grants access immediately,"
+    echo "     failure falls back to password."
+    echo
+    echo "  2) Service unlock - Face auth + auto-unlock KWallet, GNOME Keyring, etc."
+    echo "     Uses '[success=ok default=ignore]': success continues through the"
+    echo "     PAM stack so downstream modules can use the password token."
+    echo
+    read -p "Choose mode [1/2] (default: 1): " -n 1 -r PAM_MODE
+    echo
+
+    # Create backup
+    cp /etc/pam.d/system-auth /etc/pam.d/system-auth.backup
+
+    if [ "$PAM_MODE" = "2" ]; then
+        # Add pam_nihao.so with passthrough control
+        sed -i '/^#%PAM-1.0/a auth       [success=ok default=ignore] pam_nihao.so' /etc/pam.d/system-auth
+
+        # Ensure kwallet5 auth and session lines are present
+        if ! grep -q "pam_kwallet5.so" /etc/pam.d/system-auth; then
+            # Add kwallet5 auth line after pam_unix.so auth line
+            sed -i '/^auth.*pam_unix.so/a auth       optional                    pam_kwallet5.so' /etc/pam.d/system-auth
+            # Add kwallet5 session line after pam_unix.so session line
+            sed -i '/^session.*pam_unix.so/a session    optional                    pam_kwallet5.so auto_start' /etc/pam.d/system-auth
+            echo -e "${GREEN}✓ PAM configured with service unlock mode (KWallet lines added)${NC}"
+        else
+            echo -e "${GREEN}✓ PAM configured with service unlock mode (KWallet already present)${NC}"
+        fi
     else
-        # Create backup
-        cp /etc/pam.d/system-auth /etc/pam.d/system-auth.backup
-
-        # Add pam_nihao.so after #%PAM-1.0 line
         sed -i '/^#%PAM-1.0/a auth       sufficient                  pam_nihao.so' /etc/pam.d/system-auth
-
-        echo -e "${GREEN}✓ PAM configured in /etc/pam.d/system-auth${NC}"
-        echo -e "   (Backup saved to /etc/pam.d/system-auth.backup)"
+        echo -e "${GREEN}✓ PAM configured with simple mode${NC}"
     fi
+    echo -e "   (Backup saved to /etc/pam.d/system-auth.backup)"
 fi
 
 echo
@@ -204,17 +233,22 @@ echo
 echo "2. Test authentication:"
 echo "   sudo -u $ACTUAL_USER nihao test"
 echo
-echo "3. (Optional) Enable automatic service unlock:"
-echo "   This allows KWallet, GNOME Keyring, and other services to unlock"
-echo "   automatically when you authenticate with your face."
-echo
-read -p "   Would you like to set this up now? (y/N) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
+if [ "$PAM_MODE" = "2" ]; then
+    echo "3. Store your password for automatic service unlock:"
+    echo "   This allows KWallet, GNOME Keyring, and other services to unlock"
+    echo "   automatically when you authenticate with your face."
     echo
-    echo "   Storing your password for automatic service unlock..."
-    sudo -u "$ACTUAL_USER" nihao store-password || echo -e "${YELLOW}   ⚠ Password storage skipped or failed${NC}"
+    read -p "   Would you like to set this up now? (y/N) " -n 1 -r
     echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo
+        echo "   Storing your password for automatic service unlock..."
+        sudo -u "$ACTUAL_USER" nihao store-password || echo -e "${YELLOW}   ⚠ Password storage skipped or failed${NC}"
+        echo
+    fi
+else
+    echo "3. (Optional) Enable automatic service unlock later:"
+    echo "   Re-run the installer and choose mode 2 for KWallet/GNOME Keyring integration."
 fi
 echo
 echo "4. Try sudo with face auth:"
