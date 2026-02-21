@@ -63,10 +63,16 @@ fn authenticate_impl(pamh: &Pam) -> Result<(), String> {
 
     // Get the actual invoking user, not the target user
     // For sudo: SUDO_USER contains the real user, PAM_USER contains "root"
+    // For lock screen, login, etc.: PAM_USER (via get_user) is the correct user
     let user = std::env::var("SUDO_USER")
-        .or_else(|_| std::env::var("PAM_RUSER"))
-        .or_else(|_| std::env::var("USER"))
-        .map_err(|e| format!("Failed to get username: {:?}", e))?;
+        .ok()
+        .or_else(|| {
+            pamh.get_user(None)
+                .ok()
+                .flatten()
+                .map(|cstr| cstr.to_string_lossy().into_owned())
+        })
+        .ok_or_else(|| "Failed to determine username".to_string())?;
 
     log::info!("NiHao: Attempting facial authentication for user: {}", user);
 
