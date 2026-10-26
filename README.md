@@ -69,7 +69,7 @@ Downloads SCRFD (face detection) and ArcFace (embedding) models to `models/`.
 ### 3. Build
 
 ```bash
-cargo build --release
+cargo build --release --workspace
 ```
 
 ### 4. Install Models System-Wide
@@ -134,9 +134,9 @@ sudo cp target/release/nihao /usr/local/bin/nihao
 sudo chmod 755 /usr/local/bin/nihao
 
 # Now you can use it without ./nihao.sh
-nihao add               # Enroll your face
-nihao test              # Test authentication
-nihao list              # List enrolled faces
+sudo nihao add "$USER"   # Enroll your face
+sudo nihao test "$USER"  # Test authentication
+sudo nihao list "$USER"  # List enrolled faces
 ```
 
 Or keep using `./nihao.sh` wrapper script.
@@ -144,8 +144,8 @@ Or keep using `./nihao.sh` wrapper script.
 ### 7. Enroll Your Face
 
 ```bash
-./nihao.sh add          # Or: nihao add (if installed)
-./nihao.sh test         # Verify it works
+sudo nihao add "$USER"
+sudo nihao test "$USER"
 ```
 
 Faces are stored in `/var/lib/nihao/faces/`.
@@ -153,9 +153,9 @@ Faces are stored in `/var/lib/nihao/faces/`.
 ### 8. Install PAM Module
 
 ```bash
-# Install PAM module
-sudo cp target/release/libpam_nihao.so /lib/security/pam_nihao.so
-sudo chmod 755 /lib/security/pam_nihao.so
+# Install the helper and PAM module, with a rollback backup.
+# --kde-face also installs KDE's dedicated face service and enables its UI.
+sudo bash scripts/install_auth.sh --kde-face
 ```
 
 ### 9. Configure PAM (System-Wide)
@@ -201,6 +201,8 @@ After installation, files are organized as follows:
 | **Faces** | `/var/lib/nihao/faces/` | Enrolled face embeddings per user |
 | **Passwords** | `/etc/nihao/*.key` | Encrypted passwords for service unlock (optional) |
 | **PAM Module** | `/lib/security/pam_nihao.so` | PAM authentication module |
+| **Auth helper** | `/usr/lib/nihao/nihao-auth` | Root-owned setuid face verifier |
+| **KDE face service** | `/etc/pam.d/kde-face` | Dedicated lock-screen face authentication |
 | **CLI Binary** | `/usr/local/bin/nihao` (optional) | Command-line tool |
 | **PAM Config** | `/etc/pam.d/system-auth` | PAM configuration |
 
@@ -301,8 +303,9 @@ This uses standard PAM token passing mechanisms - no D-Bus complexity needed.
 - Password is encrypted with **AES-256-GCM**
 - Encryption key derived from `/etc/machine-id` (unique per machine)
 - Stored in `/etc/nihao/{username}.key` with `0600` permissions (owner read/write only)
-- Only accessible by root (PAM runs as root during authentication)
-- Same security model as fingerprint reader implementations
+- Only accessible by root; the authentication helper keeps these files private
+- Machine ID is public: encryption does not replace root-only file permissions
+- Stored passwords are returned only to privileged PAM hosts, never to desktop callers
 
 ### Disable Auto-Unlock
 
@@ -316,30 +319,36 @@ Face authentication will still work, but you'll need to manually enter your pass
 
 ## How PAM Authentication Works
 
-When you run `sudo`:
+The PAM module gets the account from PAM's `pam_get_user` API. It does not trust
+`USER` or `SUDO_USER`. It calls `/usr/lib/nihao/nihao-auth`, which verifies the
+face using root-owned templates and administrator configuration. A desktop caller
+can authenticate only its own UID. Privileged PAM hosts may authenticate the
+account requested by their PAM transaction and receive its optional service token.
 
+The helper ignores user configuration and environment library overrides. It
+serializes camera access, stops when its caller exits, and has a 15-second hard
+deadline. Password authentication remains available through the configured PAM
+fallback or KDE's separate Password method.
+
+### KDE lock-screen face unlock
+
+Recent KDE versions support a dedicated `kde-face` PAM service. The authentication
+installer installs that service and enables `[Authenticators] Face=true` for the
+user invoking sudo. On the next lock screen, choose **Face**; KDE remembers that
+choice after successful authentication. The **Password** method remains available.
+This does not require changing ownership or permissions of enrolled faces.
+
+For an existing installation, update just the authentication components:
+
+```bash
+cargo build --release --workspace
+sudo bash scripts/install_auth.sh --kde-face
 ```
-1. sudo sets environment variables:
-   SUDO_USER=johnny (the real user)
-   PAM_USER=root (target user - ignored)
 
-2. PAM loads pam_nihao.so
-
-3. Module reads SUDO_USER → "johnny"
-
-4. Loads faces from /var/lib/nihao/faces/johnny/
-
-5. Authenticates face → SUCCESS or FAIL
-
-6. On SUCCESS: sudo grants access (no password!)
-   On FAIL: Falls through to password prompt
-```
-
-**Security:**
-- Authenticates the **invoking user** (you), not the target user (root)
-- Password fallback always works
-- All attempts logged to syslog
-- No network access - 100% local
+The installer prints a backup location and rollback command. It preserves models,
+configuration and enrollment. After upgrading from the old SCRFD decoder, enroll
+a new sample with `sudo nihao add "$USER"` because corrected face alignment can
+change embeddings. Existing samples remain until you explicitly remove them.
 
 ## Uninstall
 
@@ -350,10 +359,11 @@ sudo ./uninstall.sh
 ```
 
 This will:
-- Remove PAM configuration (safely comments out instead of deleting)
+- Restore the PAM backup, or remove NiHao lines if no backup exists
 - Remove PAM module: `/lib/security/pam_nihao.so`
 - Remove CLI binary: `/usr/local/bin/nihao`
-- Optionally remove models, config, and face data (with confirmation)
+- Remove the helper, dedicated KDE face service, models and configuration
+- Preserve stored passwords and face data unless you confirm their deletion
 
 After uninstall, password authentication works normally. To reinstall, run `sudo ./install.sh`.
 
@@ -374,8 +384,8 @@ sudo dnf install onnxruntime     # Fedora
 Enroll your face first:
 
 ```bash
-./nihao.sh add
-./nihao.sh list  # Verify it saved
+sudo nihao add "$USER"
+sudo nihao list "$USER"  # Verify it saved
 ```
 
 ### "Camera not found"
@@ -391,9 +401,9 @@ Update config to point to your camera (usually `/dev/video0` or `/dev/video2`).
 
 ### Getting Locked Out
 
-You can't get locked out! The PAM config uses `[success=ok default=ignore]`, meaning:
-- ✅ Face succeeds → Authentication complete
-- ❌ Face fails → Continue to password prompt
+The simple integration uses `sufficient`, which falls through to password on a
+face-authentication failure. Service-unlock mode continues through the password
+stack using the stored token. KDE's Face and Password methods are separate.
 
 To disable face auth temporarily, edit `/etc/pam.d/system-auth` and comment out the `pam_nihao.so` line with `#`.
 
