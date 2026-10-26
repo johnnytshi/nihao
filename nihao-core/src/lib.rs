@@ -46,6 +46,8 @@ pub struct FaceRecognizer {
     store: store::FaceStore,
 }
 
+type ModelLoadResult = Result<(detect::FaceDetector, embed::FaceEmbedder), Error>;
+
 impl FaceRecognizer {
     /// Create a new face recognizer with the given configuration
     pub fn new(config: config::Config) -> Result<Self, Error> {
@@ -146,7 +148,7 @@ impl FaceRecognizer {
             use std::thread;
 
             // Shared state for passing models between threads
-            let model_result: Arc<Mutex<Option<Result<(detect::FaceDetector, embed::FaceEmbedder), Error>>>> =
+            let model_result: Arc<Mutex<Option<ModelLoadResult>>> =
                 Arc::new(Mutex::new(None));
             let model_result_clone = Arc::clone(&model_result);
 
@@ -429,7 +431,7 @@ impl FaceRecognizer {
             MAX_ENROLLMENT_FRAMES
         );
 
-        let (frame_for_embedding, face) = 'frame_loop: loop {
+        let (frame_for_embedding, face) = 'frame_loop: {
             for attempt in 0..MAX_ENROLLMENT_FRAMES {
                 match camera.capture_frame(true) {
                     Ok(f) => {

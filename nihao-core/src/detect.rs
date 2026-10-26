@@ -137,8 +137,7 @@ impl FaceDetector {
 
         // SCRFD typically outputs in groups of 3: (score, bbox, kps) for each stride
         // With 3 strides and 2 anchors per location
-        for stride_idx in 0..FEATURE_STRIDES.len() {
-            let stride = FEATURE_STRIDES[stride_idx];
+        for (stride_idx, &stride) in FEATURE_STRIDES.iter().enumerate() {
             let feat_size = INPUT_SIZE as usize / stride;
 
             // Generate anchors for this stride

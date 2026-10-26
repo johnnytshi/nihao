@@ -152,7 +152,7 @@ fn cmd_list(username: String) -> anyhow::Result<()> {
 
     println!("Enrolled faces for {}:", username);
     println!();
-    println!("{:<15} {:<20} {}", "Face ID", "Label", "Enrolled At");
+    println!("{:<15} {:<20} Enrolled At", "Face ID", "Label");
     println!("{}", "-".repeat(60));
 
     for face in faces {

@@ -67,7 +67,7 @@ impl Camera {
             .map_err(|e| CaptureError::DeviceOpen(format!("Failed to get format: {}", e)))?;
 
         // Try to set desired resolution
-        let mut format = fmt.clone();
+        let mut format = fmt;
         format.width = config.width;
         format.height = config.height;
 
