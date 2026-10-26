@@ -177,8 +177,7 @@ echo -e "${GREEN}✓ PAM module installed to /lib/security/pam_nihao.so${NC}"
 
 # 6. Install CLI binary
 echo -e "${BLUE}[6/7] Installing CLI binary...${NC}"
-cp target/release/nihao /usr/local/bin/nihao
-chmod 755 /usr/local/bin/nihao
+# Installed atomically with the PAM module and helper in the previous step.
 echo -e "${GREEN}✓ CLI binary installed to /usr/local/bin/nihao${NC}"
 
 # 7. Configure PAM
