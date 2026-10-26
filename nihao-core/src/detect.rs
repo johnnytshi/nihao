@@ -101,7 +101,7 @@ impl FaceDetector {
     /// Detect faces in an image
     pub fn detect(&mut self, image: &RgbImage) -> Result<Vec<DetectedFace>, DetectionError> {
         // Preprocess image
-        let (input_tensor, scale_x, scale_y) = self.preprocess(image);
+        let (input_tensor, scale_x, scale_y) = Self::preprocess(image);
 
         // Convert to Value
         let input_value = Value::from_array(input_tensor)
@@ -174,36 +174,13 @@ impl FaceDetector {
                 for anchor_num in 0..num_anchors_per_loc {
                     let idx = anchor_idx * num_anchors_per_loc + anchor_num;
 
-                    // Score is typically at index [idx, 0] or just [idx]
-                    // Apply sigmoid to convert logits to probabilities [0, 1]
-                    let raw_score = if idx < score_data.len() {
-                        score_data[idx]
-                    } else {
+                    // SCRFD exports probabilities: the ONNX graph already applies sigmoid.
+                    let Some(&score) = score_data.get(idx) else {
                         continue;
                     };
-                    let score = 1.0 / (1.0 + (-raw_score).exp());
-
-                    // VALIDATION: Check for abnormal confidence scores
-                    if score > 1.0 {
-                        log::warn!(
-                            "Abnormal detection confidence: {:.2} (expected 0.0-1.0). \
-                             This may indicate preprocessing issues with IR camera input.",
-                            score
-                        );
-
-                        // Log image statistics for debugging
-                        log::warn!(
-                            "If this persists, try: (1) Increase CLAHE clip_limit, \
-                             (2) Check camera exposure, (3) Verify image preprocessing"
-                        );
-
-                        // Skip this detection as it's likely a false positive
+                    let Some(score) = Self::confidence_score(score, self.confidence_threshold) else {
                         continue;
-                    }
-
-                    if score < self.confidence_threshold {
-                        continue;
-                    }
+                    };
 
                     // Decode bounding box (4 values: dx1, dy1, dx2, dy2)
                     let bbox_offset = idx * 4;
@@ -280,13 +257,22 @@ impl FaceDetector {
         Ok(detections)
     }
 
-    /// Generate anchor centers for a given stride
+    /// Keep valid exported probabilities above the configured threshold.
+    fn confidence_score(score: f32, threshold: f32) -> Option<f32> {
+        if !(0.0..=1.0).contains(&score) {
+            log::warn!("Ignoring invalid SCRFD confidence: {}", score);
+            return None;
+        }
+        (score >= threshold).then_some(score)
+    }
+
+    /// Generate SCRFD anchor centers on integer feature-grid coordinates.
     fn generate_anchors(stride: usize, feat_size: usize) -> Vec<(f32, f32)> {
         let mut anchors = Vec::new();
         for i in 0..feat_size {
             for j in 0..feat_size {
-                let cx = (j as f32 + 0.5) * stride as f32;
-                let cy = (i as f32 + 0.5) * stride as f32;
+                let cx = j as f32 * stride as f32;
+                let cy = i as f32 * stride as f32;
                 anchors.push((cx, cy));
             }
         }
@@ -294,14 +280,14 @@ impl FaceDetector {
     }
 
     /// Decode SCRFD bounding box predictions from anchor-relative format
-    fn decode_bbox(anchor: (f32, f32), pred: &[f32], _stride: f32) -> (f32, f32, f32, f32) {
+    fn decode_bbox(anchor: (f32, f32), pred: &[f32], stride: f32) -> (f32, f32, f32, f32) {
         let (cx, cy) = anchor;
 
-        // det_10g format: distances WITHOUT stride multiplication
-        let left = pred[0].abs();
-        let top = pred[1].abs();
-        let right = pred[2].abs();
-        let bottom = pred[3].abs();
+        // Exported distances are measured in feature-grid units, like landmarks.
+        let left = pred[0] * stride;
+        let top = pred[1] * stride;
+        let right = pred[2] * stride;
+        let bottom = pred[3] * stride;
 
         let x1 = cx - left;
         let y1 = cy - top;
@@ -324,7 +310,7 @@ impl FaceDetector {
     }
 
     /// Preprocess image for SCRFD model
-    fn preprocess(&self, image: &RgbImage) -> (([usize; 4], Vec<f32>), f32, f32) {
+    fn preprocess(image: &RgbImage) -> (([usize; 4], Vec<f32>), f32, f32) {
         let (orig_width, orig_height) = image.dimensions();
 
         // Image statistics disabled for performance
@@ -340,17 +326,15 @@ impl FaceDetector {
         let scale_x = INPUT_SIZE as f32 / orig_width as f32;
         let scale_y = INPUT_SIZE as f32 / orig_height as f32;
 
-        // Convert to NCHW format with BGR ordering and normalize to [-1, 1]
-        // SCRFD expects BGR format (not RGB) with mean=127.5, std=128.0
+        // SCRFD expects RGB NCHW with mean=127.5 and std=128.0.
         let mut input_data = Vec::with_capacity((INPUT_SIZE * INPUT_SIZE * 3) as usize);
 
-        // Channel-first (CHW) ordering with RGB to BGR conversion
+        // Input images already use RGB channel order.
         for c in 0..3 {
             for y in 0..INPUT_SIZE {
                 for x in 0..INPUT_SIZE {
                     let pixel = resized.get_pixel(x, y);
-                    // Try RGB order (no channel swap) with [0, 1] normalization
-                    let value = pixel[c] as f32 / 255.0;
+                    let value = (pixel[c] as f32 - 127.5) / 128.0;
                     input_data.push(value);
                 }
             }
@@ -405,6 +389,78 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_scrfd_scores_are_already_probabilities() {
+        // The exported model has already applied sigmoid. Background must stay
+        // below the default threshold, and strong scores must stay above 0.9.
+        assert_eq!(FaceDetector::confidence_score(0.03, 0.5), None);
+        assert_eq!(FaceDetector::confidence_score(0.49, 0.5), None);
+        assert_eq!(FaceDetector::confidence_score(0.5, 0.5), Some(0.5));
+        assert_eq!(FaceDetector::confidence_score(0.95, 0.9), Some(0.95));
+    }
+
+    #[test]
+    fn test_invalid_scrfd_scores_are_rejected() {
+        for score in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.01, 1.01] {
+            assert_eq!(FaceDetector::confidence_score(score, 0.5), None);
+        }
+    }
+
+    #[test]
+    fn test_scrfd_anchor_centers_use_integer_grid() {
+        assert_eq!(
+            FaceDetector::generate_anchors(8, 2),
+            vec![(0.0, 0.0), (8.0, 0.0), (0.0, 8.0), (8.0, 8.0)]
+        );
+    }
+
+    #[test]
+    fn test_scrfd_box_decoding_and_nms_agree_across_strides() {
+        // Both feature levels describe the same 32x48 face at image (8, 8).
+        // NMS must suppress the duplicate regardless of feature stride.
+        let predictions = [
+            ((16.0, 24.0), [1.0, 2.0, 3.0, 4.0], 8.0),
+            ((16.0, 16.0), [0.5, 0.5, 1.5, 2.5], 16.0),
+        ];
+        let faces: Vec<_> = predictions
+            .iter()
+            .map(|(anchor, distances, stride)| {
+                let (x, y, width, height) = FaceDetector::decode_bbox(*anchor, distances, *stride);
+                assert_eq!((x, y, width, height), (8.0, 8.0, 32.0, 48.0));
+                DetectedFace {
+                    bbox: BoundingBox {
+                        x,
+                        y,
+                        width,
+                        height,
+                    },
+                    landmarks: FaceDetector::decode_landmarks(*anchor, &[0.0; 10], *stride),
+                    confidence: 0.9,
+                }
+            })
+            .collect();
+        assert_eq!(FaceDetector::nms(faces, 0.4).len(), 1);
+    }
+
+    #[test]
+    fn test_scrfd_input_uses_normalized_rgb_nchw() {
+        let image = RgbImage::from_pixel(320, 240, image::Rgb([0, 128, 255]));
+        let ((shape, data), scale_x, scale_y) = FaceDetector::preprocess(&image);
+        assert_eq!(shape, [1, 3, 640, 640]);
+        assert_eq!(scale_x, 2.0);
+        assert_eq!(scale_y, 640.0 / 240.0);
+
+        let plane_size = 640 * 640;
+        assert_eq!(data.len(), 3 * plane_size);
+        for (channel, expected) in [-127.5 / 128.0, 0.5 / 128.0, 127.5 / 128.0]
+            .into_iter()
+            .enumerate()
+        {
+            let plane = &data[channel * plane_size..(channel + 1) * plane_size];
+            assert!(plane.iter().all(|&value| (value - expected).abs() < 1e-6));
+        }
+    }
+
+    #[test]
     fn test_bbox_area() {
         let bbox = BoundingBox {
             x: 0.0,
@@ -438,12 +494,16 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires model file
+    #[ignore = "Requires downloaded SCRFD model and ONNX Runtime"]
     fn test_face_detection() {
-        // This test requires the SCRFD model
-        // let runtime = OnnxRuntime::new().unwrap();
-        // let config = RuntimeConfig { provider: ExecutionProvider::CPU };
-        // let detector = FaceDetector::new("models/scrfd_500m.onnx", &runtime, &config, 0.5).unwrap();
+        let runtime = OnnxRuntime::new().unwrap();
+        let model = Path::new(env!("CARGO_MANIFEST_DIR")).join("../models/scrfd_500m.onnx");
+        let mut detector = FaceDetector::new(model, &runtime, &RuntimeConfig {}, 0.5).unwrap();
+        let image = RgbImage::from_pixel(640, 480, image::Rgb([128, 128, 128]));
+        assert!(matches!(
+            detector.detect(&image),
+            Err(DetectionError::NoFaces)
+        ));
     }
 }
 
