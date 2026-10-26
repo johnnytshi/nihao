@@ -3,6 +3,9 @@
 
 set -e
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -91,7 +94,7 @@ echo -e "${GREEN}✓ All prerequisites met${NC}"
 
 # 1. Build project
 echo -e "${BLUE}[1/7] Building project...${NC}"
-sudo -u "$ACTUAL_USER" cargo build --release
+sudo -u "$ACTUAL_USER" cargo build --release --workspace
 echo -e "${GREEN}✓ Build complete${NC}"
 
 # 2. Download and install models
@@ -123,6 +126,7 @@ if [ -e "/dev/video2" ]; then
 fi
 
 mkdir -p /etc/nihao
+if [ ! -e /etc/nihao/nihao.toml ]; then
 cat > /etc/nihao/nihao.toml <<EOF
 [camera]
 device = "$CAMERA_DEVICE"
@@ -143,6 +147,8 @@ threshold = 0.4
 max_frames = 10
 timeout_secs = 4
 
+[runtime]
+
 [storage]
 database_path = "/var/lib/nihao/faces"
 
@@ -150,6 +156,9 @@ database_path = "/var/lib/nihao/faces"
 save_screenshots = false
 output_dir = "~/.cache/nihao/debug"
 EOF
+else
+    echo "Keeping existing /etc/nihao/nihao.toml"
+fi
 
 chmod 644 /etc/nihao/nihao.toml
 echo -e "${GREEN}✓ Config created at /etc/nihao/nihao.toml${NC}"
@@ -163,8 +172,7 @@ echo -e "${GREEN}✓ Face storage created at /var/lib/nihao/faces/${NC}"
 
 # 5. Install PAM module
 echo -e "${BLUE}[5/7] Installing PAM module...${NC}"
-cp target/release/libpam_nihao.so /lib/security/pam_nihao.so
-chmod 755 /lib/security/pam_nihao.so
+bash scripts/install_auth.sh --kde-face
 echo -e "${GREEN}✓ PAM module installed to /lib/security/pam_nihao.so${NC}"
 
 # 6. Install CLI binary
@@ -228,10 +236,10 @@ echo
 echo -e "${YELLOW}Next steps:${NC}"
 echo
 echo "1. Enroll your face:"
-echo "   sudo -u $ACTUAL_USER nihao add"
+echo "   sudo nihao add $ACTUAL_USER"
 echo
 echo "2. Test authentication:"
-echo "   sudo -u $ACTUAL_USER nihao test"
+echo "   sudo nihao test $ACTUAL_USER"
 echo
 if [ "$PAM_MODE" = "2" ]; then
     echo "3. Store your password for automatic service unlock:"
@@ -243,7 +251,7 @@ if [ "$PAM_MODE" = "2" ]; then
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo
         echo "   Storing your password for automatic service unlock..."
-        sudo -u "$ACTUAL_USER" nihao store-password || echo -e "${YELLOW}   ⚠ Password storage skipped or failed${NC}"
+        /usr/local/bin/nihao store-password "$ACTUAL_USER" || echo -e "${YELLOW}   ⚠ Password storage skipped or failed${NC}"
         echo
     fi
 else
