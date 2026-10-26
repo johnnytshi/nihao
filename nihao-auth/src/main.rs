@@ -6,7 +6,8 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
-fn prepare_process() -> Result<(), String> {
+fn prepare_process() -> Result<u32, String> {
+    let caller_uid = unsafe { libc::getuid() };
     // Scrub here as well as in PAM: any local process can invoke this executable.
     for (name, _) in std::env::vars_os() {
         std::env::remove_var(name);
@@ -29,7 +30,8 @@ fn prepare_process() -> Result<(), String> {
             return Err("Authentication helper requires root privilege".into());
         }
     }
-    configure_lifecycle(HELPER_TIMEOUT.as_secs() as u32)
+    configure_lifecycle(HELPER_TIMEOUT.as_secs() as u32)?;
+    Ok(caller_uid)
 }
 
 fn configure_lifecycle(timeout_secs: u32) -> Result<(), String> {
@@ -55,7 +57,7 @@ fn configure_lifecycle(timeout_secs: u32) -> Result<(), String> {
     Ok(())
 }
 
-fn authenticate() -> Result<AuthResponse, String> {
+fn authenticate(caller_uid: u32) -> Result<AuthResponse, String> {
     let mut args = std::env::args_os().skip(1);
     let username = args
         .next()
@@ -65,8 +67,21 @@ fn authenticate() -> Result<AuthResponse, String> {
     if args.next().is_some() {
         return Err("Unexpected authentication helper arguments".into());
     }
-    let caller_uid = unsafe { libc::getuid() };
     authorize(caller_uid, account_uid(&username)?)?;
+    unsafe {
+        // Once identity is authorized, prevent that UID from stopping a helper
+        // which holds the global camera lock. Keep caller_uid for token policy.
+        let parent = libc::getppid();
+        if parent == 1
+            || libc::setresuid(0, 0, 0) != 0
+            || libc::prctl(libc::PR_SET_DUMPABLE, 0) != 0
+            || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0
+            || libc::getppid() != parent
+        {
+            return Err("Cannot protect privileged authentication lifetime".into());
+        }
+        // The existing alarm remains armed across setresuid. Do not restart it.
+    }
     // Serialize requests before allocating models or opening the camera.
     let lock = std::fs::OpenOptions::new()
         .read(true)
@@ -140,9 +155,9 @@ fn validate_enrollment(config: &Config, username: &str) -> Result<(), String> {
 
 fn main() {
     let result = std::panic::catch_unwind(|| {
-        prepare_process()?;
+        let caller_uid = prepare_process()?;
         let _ = syslog::init_unix(syslog::Facility::LOG_AUTH, log::LevelFilter::Warn);
-        let response = authenticate()?;
+        let response = authenticate(caller_uid)?;
         let bytes = serde_json::to_vec(&response).map_err(|e| e.to_string())?;
         if bytes.len() > MAX_RESPONSE_BYTES {
             return Err("Authentication response too large".into());

@@ -191,6 +191,9 @@ fn collect_response(command: &mut Command, timeout: Duration) -> Result<Vec<u8>,
     if result.is_err() {
         let _ = child.kill();
     }
+    // The verifier normalizes its UIDs after authorization, so an unprivileged
+    // PAM host may not be allowed to signal it. Its independent alarm bounds
+    // this reap, and parent-death SIGKILL covers cancellation of the PAM host.
     let _ = child.wait();
     result
 }
