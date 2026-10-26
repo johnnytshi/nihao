@@ -102,7 +102,7 @@ impl FaceRecognizer {
     /// Returns true if a match is found within the configured parameters
     pub fn authenticate(&mut self, username: &str) -> Result<bool, Error> {
         // Check if user has enrolled faces
-        if !self.store.has_faces(username) {
+        if !self.store.has_faces(username)? {
             return Err(Error::NoEnrolledFaces(username.to_string()));
         }
 

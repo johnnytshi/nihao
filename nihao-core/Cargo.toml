@@ -23,6 +23,7 @@ aes-gcm.workspace = true
 rand.workspace = true
 sha2.workspace = true
 serde_json.workspace = true
+libc.workspace = true
 
 [lib]
 name = "nihao_core"
