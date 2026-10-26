@@ -1,4 +1,5 @@
 use crate::config::CameraConfig;
+use crate::infrared::{self, IlluminationGuard};
 use image::{ImageBuffer, RgbImage};
 use std::fs;
 use std::time::{Duration, Instant};
@@ -37,6 +38,11 @@ impl From<std::io::Error> for CaptureError {
 const DEFAULT_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct Camera {
+    // v4l owns its mappings and Arc<Handle>; the lifetime does not borrow Device.
+    // Declaration order matters: stop the stream before restoring illumination,
+    // then release the last camera device handle.
+    stream: Option<MmapStream<'static>>,
+    _illumination: Option<IlluminationGuard>,
     device: Device,
     width: u32,
     height: u32,
@@ -63,7 +69,8 @@ impl Camera {
             .map_err(|e| CaptureError::DeviceOpen(format!("{}: {}", device_path, e)))?;
 
         // Get current format
-        let fmt = device.format()
+        let fmt = device
+            .format()
             .map_err(|e| CaptureError::DeviceOpen(format!("Failed to get format: {}", e)))?;
 
         // Try to set desired resolution
@@ -72,10 +79,7 @@ impl Camera {
         format.height = config.height;
 
         // Prefer MJPEG if available, fallback to YUYV
-        let preferred_formats = [
-            FourCC::new(b"MJPG"),
-            FourCC::new(b"YUYV"),
-        ];
+        let preferred_formats = [FourCC::new(b"MJPG"), FourCC::new(b"YUYV")];
 
         let mut set_format = format;
         for &fourcc in &preferred_formats {
@@ -86,8 +90,13 @@ impl Camera {
         }
 
         // Get the actual format that was set
-        let actual_format = device.format()
+        let actual_format = device
+            .format()
             .map_err(|e| CaptureError::DeviceOpen(format!("Failed to verify format: {}", e)))?;
+
+        // Only a verified supported camera receives emitter control writes.
+        // Keep the restoring guard alive for the full continuous capture session.
+        let illumination = infrared::enable_for_camera(&device, device_num)?;
 
         log::info!(
             "Camera initialized: {}x{} {}",
@@ -97,6 +106,8 @@ impl Camera {
         );
 
         Ok(Self {
+            stream: None,
+            _illumination: illumination,
             device,
             width: actual_format.width,
             height: actual_format.height,
@@ -104,7 +115,6 @@ impl Camera {
             config: config.clone(),
         })
     }
-
 
     /// Capture a frame with a finite wait, including for enrollment and snapshots.
     pub fn capture_frame(&mut self, check_quality: bool) -> Result<RgbImage, CaptureError> {
@@ -119,24 +129,34 @@ impl Camera {
     ) -> Result<RgbImage, CaptureError> {
         let started = Instant::now();
         Self::stream_timeout(timeout, Duration::ZERO)?;
-        let mut stream = MmapStream::with_buffers(&self.device, v4l::buffer::Type::VideoCapture, 4)?;
-        stream.set_timeout(Self::stream_timeout(timeout, started.elapsed())?);
-
-        let (buf, _meta) = stream.next()?;
-        if started.elapsed() >= timeout {
-            return Err(CaptureError::Timeout);
-        }
-
-        let rgb = match self.format.str() {
-            Ok("MJPG") => self.decode_mjpeg(buf)?,
-            Ok("YUYV") => self.decode_yuyv(buf)?,
-            _ => {
-                return Err(CaptureError::Conversion(format!(
-                    "Unsupported pixel format: {}",
-                    self.format
-                )))
-            }
-        };
+        let device = &self.device;
+        let format = self.format;
+        let (width, height) = (self.width, self.height);
+        let rgb = Self::with_stream(
+            &mut self.stream,
+            || MmapStream::with_buffers(device, v4l::buffer::Type::VideoCapture, 4),
+            |stream| {
+                stream.set_timeout(Self::stream_timeout(timeout, started.elapsed())?);
+                let (buf, _meta) = stream.next()?;
+                if started.elapsed() >= timeout {
+                    return Err(CaptureError::Timeout);
+                }
+                let rgb = match format.str() {
+                    Ok("MJPG") => Self::decode_mjpeg(buf)?,
+                    Ok("YUYV") => Self::decode_yuyv(buf, width, height)?,
+                    _ => {
+                        return Err(CaptureError::Conversion(format!(
+                            "Unsupported pixel format: {}",
+                            format
+                        )));
+                    }
+                };
+                if started.elapsed() >= timeout {
+                    return Err(CaptureError::Timeout);
+                }
+                Ok(rgb)
+            },
+        )?;
 
         if check_quality {
             // Check frame darkness (filter bad IR emitter reads)
@@ -167,6 +187,27 @@ impl Camera {
         Ok(rgb)
     }
 
+    /// Reuse a running stream for retries, including rejected/dark frames. A
+    /// transport failure invalidates v4l's queued-buffer state; close that stream
+    /// so the next attempt can initialize it cleanly.
+    fn with_stream<S, T>(
+        slot: &mut Option<S>,
+        create: impl FnOnce() -> std::io::Result<S>,
+        capture: impl FnOnce(&mut S) -> Result<T, CaptureError>,
+    ) -> Result<T, CaptureError> {
+        if slot.is_none() {
+            *slot = Some(create()?);
+        }
+        let result = capture(slot.as_mut().expect("capture stream initialized"));
+        if matches!(
+            &result,
+            Err(CaptureError::Timeout | CaptureError::V4L(_) | CaptureError::Capture(_))
+        ) {
+            *slot = None;
+        }
+        result
+    }
+
     fn stream_timeout(timeout: Duration, elapsed: Duration) -> Result<Duration, CaptureError> {
         let remaining = timeout
             .checked_sub(elapsed)
@@ -176,7 +217,6 @@ impl Camera {
         // budgets finite and within that range; sub-millisecond waits poll once.
         Ok(remaining.min(Duration::from_millis(i32::MAX as u64)))
     }
-
 
     /// Analyze frame darkness to filter out bad IR emitter reads
     /// Returns (darkness_percentage, is_bad_frame)
@@ -262,9 +302,8 @@ impl Camera {
         (overexposed_pct, is_too_bright)
     }
 
-
     /// Decode MJPEG frame to RGB
-    fn decode_mjpeg(&self, data: &[u8]) -> Result<RgbImage, CaptureError> {
+    fn decode_mjpeg(data: &[u8]) -> Result<RgbImage, CaptureError> {
         let img = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)
             .map_err(|e| CaptureError::Conversion(format!("MJPEG decode failed: {}", e)))?;
 
@@ -272,9 +311,9 @@ impl Camera {
     }
 
     /// Decode YUYV frame to RGB
-    fn decode_yuyv(&self, data: &[u8]) -> Result<RgbImage, CaptureError> {
-        let width = self.width as usize;
-        let height = self.height as usize;
+    fn decode_yuyv(data: &[u8], width: u32, height: u32) -> Result<RgbImage, CaptureError> {
+        let width = width as usize;
+        let height = height as usize;
 
         if data.len() < width * height * 2 {
             return Err(CaptureError::Conversion(
@@ -363,23 +402,110 @@ impl Camera {
             .map_err(|e| CaptureError::DeviceOpen(format!("{}: {}", device_path, e)))?;
 
         // Get device capabilities
-        let caps = device.query_caps()
+        let caps = device
+            .query_caps()
             .map_err(|e| CaptureError::DeviceOpen(format!("Failed to query caps: {}", e)))?;
 
         // Check device name for IR indicators
         let name_lower = caps.card.to_lowercase();
-        let is_ir = name_lower.contains("ir") ||
-                    name_lower.contains("infrared") ||
-                    name_lower.contains("depth");
+        let is_ir = name_lower.contains("ir")
+            || name_lower.contains("infrared")
+            || name_lower.contains("depth");
 
         Ok(is_ir)
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct TestStream(Rc<Cell<usize>>);
+
+    impl Drop for TestStream {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    #[test]
+    fn test_capture_retries_reuse_stream_until_transport_failure() {
+        let allocations = Cell::new(0);
+        let drops = Rc::new(Cell::new(0));
+        let create = || {
+            allocations.set(allocations.get() + 1);
+            Ok(TestStream(Rc::clone(&drops)))
+        };
+        let mut stream = None;
+
+        assert_eq!(
+            Camera::with_stream(&mut stream, create, |_| Ok(1)).unwrap(),
+            1
+        );
+        // A rejected dark frame or invalid JPEG must not power-cycle the camera.
+        for error in [
+            CaptureError::BadFrame("dark frame".into()),
+            CaptureError::Conversion("invalid JPEG".into()),
+        ] {
+            assert!(Camera::with_stream(&mut stream, create, |_| { Err::<(), _>(error) }).is_err());
+        }
+        assert_eq!(
+            Camera::with_stream(&mut stream, create, |_| Ok(2)).unwrap(),
+            2
+        );
+        assert_eq!(allocations.get(), 1);
+        assert_eq!(drops.get(), 0);
+
+        assert!(matches!(
+            Camera::with_stream(&mut stream, create, |_| Err::<(), _>(CaptureError::Timeout)),
+            Err(CaptureError::Timeout)
+        ));
+        assert!(stream.is_none());
+        assert_eq!(drops.get(), 1);
+
+        Camera::with_stream(&mut stream, create, |_| Ok(())).unwrap();
+        assert_eq!(allocations.get(), 2);
+        drop(stream);
+        assert_eq!(drops.get(), 2);
+    }
+
+    #[test]
+    fn test_stream_creation_failure_does_not_capture_or_retain_stream() {
+        let mut stream: Option<TestStream> = None;
+        let result = Camera::with_stream(
+            &mut stream,
+            || {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "camera denied",
+                ))
+            },
+            |_| -> Result<(), CaptureError> { panic!("capture called after failed stream setup") },
+        );
+        assert!(matches!(result, Err(CaptureError::V4L(_))));
+        assert!(stream.is_none());
+    }
+
+    #[test]
+    fn test_device_error_releases_failed_stream() {
+        let drops = Rc::new(Cell::new(0));
+        let mut stream = Some(TestStream(Rc::clone(&drops)));
+        let result = Camera::with_stream(
+            &mut stream,
+            || -> std::io::Result<TestStream> { panic!("existing stream recreated") },
+            |_| -> Result<(), CaptureError> {
+                Err(
+                    std::io::Error::new(std::io::ErrorKind::NotConnected, "camera disconnected")
+                        .into(),
+                )
+            },
+        );
+        assert!(matches!(result, Err(CaptureError::V4L(_))));
+        assert!(stream.is_none());
+        assert_eq!(drops.get(), 1);
+    }
 
     #[test]
     fn test_stream_timeout_uses_remaining_budget() {
@@ -402,7 +528,10 @@ mod tests {
         let timeout = Camera::stream_timeout(Duration::MAX, Duration::ZERO).unwrap();
         assert_eq!(i32::try_from(timeout.as_millis()).unwrap(), i32::MAX);
         let short = Duration::from_micros(500);
-        assert_eq!(Camera::stream_timeout(short, Duration::ZERO).unwrap(), short);
+        assert_eq!(
+            Camera::stream_timeout(short, Duration::ZERO).unwrap(),
+            short
+        );
     }
 
     #[test]

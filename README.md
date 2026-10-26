@@ -338,6 +338,18 @@ user invoking sudo. On the next lock screen, choose **Face**; KDE remembers that
 choice after successful authentication. The **Password** method remains available.
 This does not require changing ownership or permissions of enrolled faces.
 
+### Infrared illumination
+
+For the ASUS IR camera with USB ID `0bda:636e`, NiHao enables the camera's
+documented alternating IR illumination mode during capture and restores its
+previous mode when the camera closes. It keeps the stream running across frame
+retries so illuminated and ambient frames can arrive in sequence.
+
+Recognition in a lit room does not verify illumination. After installing an IR
+capture update, test face authentication with the room lights off and check the
+camera's red IR emitter. The camera's JPEG output is also monochrome; JPEG
+compression does not imply use of the color camera.
+
 For an existing installation, update just the authentication components:
 
 ```bash
