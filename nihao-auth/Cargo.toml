@@ -1,0 +1,17 @@
+[package]
+name = "nihao-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nihao-core = { path = "../nihao-core" }
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+log.workspace = true
+syslog.workspace = true
+
+[[bin]]
+name = "nihao-auth"
+path = "src/main.rs"

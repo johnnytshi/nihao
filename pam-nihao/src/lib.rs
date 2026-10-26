@@ -1,177 +1,101 @@
-use lazy_static::lazy_static;
-use nihao_core::{config::Config, password::PasswordStore, FaceRecognizer};
-use pamsm::{Pam, PamError, PamFlag, PamLibExt, PamServiceModule};
-use std::ffi::CString;
-use std::panic;
-use std::sync::Mutex;
-use std::time::Duration;
+//! PAM stays in the caller's security context; privileged work is delegated.
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int, c_void};
 
-lazy_static! {
-    /// Global recognizer instance with lazy initialization
-    /// This allows model loading to happen once and be reused across authentication attempts
-    static ref RECOGNIZER: Mutex<Option<FaceRecognizer>> = Mutex::new(None);
+// Linux-PAM constants from security/_pam_types.h. Use C integers at the ABI
+// boundary: Rust enums cannot represent arbitrary PAM flag combinations.
+const PAM_SUCCESS: c_int = 0;
+const PAM_SERVICE_ERR: c_int = 3;
+const PAM_AUTH_ERR: c_int = 7;
+const PAM_AUTHTOK: c_int = 6;
+
+#[link(name = "pam")]
+extern "C" {
+    fn pam_get_user(pamh: *mut c_void, user: *mut *const c_char, prompt: *const c_char) -> c_int;
+    fn pam_set_item(pamh: *mut c_void, item: c_int, value: *const c_void) -> c_int;
 }
 
-struct PamNihao;
-
-impl PamServiceModule for PamNihao {
-    fn authenticate(pamh: Pam, _flags: PamFlag, _args: Vec<String>) -> PamError {
-        // Initialize syslog (ignore errors)
-        // Use Warn level in release builds to reduce log noise
-        #[cfg(debug_assertions)]
-        let log_level = log::LevelFilter::Info;
-        #[cfg(not(debug_assertions))]
-        let log_level = log::LevelFilter::Warn;
-
-        let _ = syslog::init_unix(syslog::Facility::LOG_AUTH, log_level);
-
-        // CRITICAL: Wrap everything in catch_unwind to prevent panics from crossing FFI boundary
-        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            authenticate_impl(&pamh)
-        }));
-
-        match result {
-            Ok(Ok(())) => {
-                log::info!("NiHao: Authentication succeeded");
-                PamError::SUCCESS
-            }
-            Ok(Err(e)) => {
-                log::warn!("NiHao: Authentication failed: {}", e);
-                PamError::AUTH_ERR
-            }
-            Err(_) => {
-                log::error!("NiHao: Panic caught during authentication! Falling through to password");
-                PamError::SERVICE_ERR
-            }
+unsafe fn authenticate_impl(pamh: *mut c_void) -> Result<(), String> {
+    if pamh.is_null() {
+        return Err("Missing PAM handle".into());
+    }
+    let mut user = std::ptr::null();
+    if pam_get_user(pamh, &mut user, std::ptr::null()) != PAM_SUCCESS || user.is_null() {
+        return Err("Cannot determine PAM account".into());
+    }
+    let username = CStr::from_ptr(user)
+        .to_str()
+        .map_err(|_| "Invalid PAM account name")?;
+    let result = nihao_auth::authenticate(username)?;
+    if let Some(token) = result.token {
+        let token = CString::new(token).map_err(|_| "Invalid stored service password")?;
+        if pam_set_item(pamh, PAM_AUTHTOK, token.as_ptr().cast()) != PAM_SUCCESS {
+            log::warn!("NiHao: cannot set service unlock password");
         }
     }
-
-    fn setcred(_pamh: Pam, _flags: PamFlag, _args: Vec<String>) -> PamError {
-        PamError::SUCCESS
-    }
-
-    fn acct_mgmt(_pamh: Pam, _flags: PamFlag, _args: Vec<String>) -> PamError {
-        PamError::SUCCESS
-    }
+    Ok(())
 }
 
-/// Internal authentication implementation
-/// This is separate to allow catch_unwind to work properly
-fn authenticate_impl(pamh: &Pam) -> Result<(), String> {
-    // NOTE: We don't redirect stdout/stderr because it affects the calling process
-    // Instead, we ensure zero prints in our code (verified by audit) and use syslog only
-
-    // Get the actual invoking user, not the target user
-    // For sudo: SUDO_USER contains the real user, PAM_USER contains "root"
-    // For lock screen, login, etc.: PAM_USER (via get_user) is the correct user
-    let user = std::env::var("SUDO_USER")
-        .ok()
-        .or_else(|| {
-            pamh.get_user(None)
-                .ok()
-                .flatten()
-                .map(|cstr| cstr.to_string_lossy().into_owned())
-        })
-        .ok_or_else(|| "Failed to determine username".to_string())?;
-
-    log::info!("NiHao: Attempting facial authentication for user: {}", user);
-
-    // Load configuration
-    let config = Config::load().map_err(|e| format!("Failed to load config: {}", e))?;
-
-    // Get or initialize recognizer
-    let mut recognizer_lock = RECOGNIZER
-        .lock()
-        .map_err(|e| format!("Failed to lock recognizer: {}", e))?;
-
-    if recognizer_lock.is_none() {
-        log::debug!("NiHao: Initializing face recognizer (first use)");
-        let recognizer = FaceRecognizer::new(config.clone())
-            .map_err(|e| format!("Failed to create recognizer: {}", e))?;
-        *recognizer_lock = Some(recognizer);
-    }
-
-    let recognizer = recognizer_lock
-        .as_mut()
-        .ok_or_else(|| "Recognizer not initialized".to_string())?;
-
-    // Check if user has enrolled faces
-    if !recognizer.store().has_faces(&user) {
-        log::info!("NiHao: No enrolled faces for user {}, falling through", user);
-        return Err("No enrolled faces".to_string());
-    }
-
-    // Set timeout for authentication
-    let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(config.matching.timeout_secs);
-
-    // Authenticate with timeout check
-    let auth_result = recognizer.authenticate(&user);
-
-    if start.elapsed() > timeout {
-        log::warn!("NiHao: Authentication timeout");
-        return Err("Timeout".to_string());
-    }
-
-    match auth_result {
-        Ok(true) => {
-            log::info!("NiHao: Face recognized for user: {}", user);
-
-            // Try to set PAM_AUTHTOK for automatic service unlock (KWallet, GNOME Keyring, etc.)
-            let password_store = PasswordStore::new("/etc/nihao");
-            if password_store.has_password(&user) {
-                match password_store.load_password(&user) {
-                    Ok(password) => {
-                        // Convert password to CString for PAM
-                        match CString::new(password) {
-                            Ok(c_password) => {
-                                // Set PAM_AUTHTOK
-                                match pamh.set_authtok(&c_password) {
-                                    Ok(_) => {
-                                        log::info!("NiHao: PAM_AUTHTOK set successfully for service unlock");
-                                    }
-                                    Err(e) => {
-                                        log::warn!("NiHao: Failed to set PAM_AUTHTOK: {:?}", e);
-                                        // Don't fail auth if we can't set the token
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                log::warn!("NiHao: Failed to convert password to CString: {}", e);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("NiHao: Failed to load stored password: {}", e);
-                        // Don't fail auth if we can't load the password
-                    }
-                }
-            } else {
-                log::debug!("NiHao: No stored password for user {}, services won't auto-unlock", user);
-            }
-
-            Ok(())
+/// # Safety
+/// `pamh` must be a live Linux-PAM handle, or null for a rejected request.
+#[no_mangle]
+pub unsafe extern "C" fn pam_sm_authenticate(
+    pamh: *mut c_void,
+    _flags: c_int,
+    _argc: c_int,
+    _argv: *const *const c_char,
+) -> c_int {
+    let _ = syslog::init_unix(syslog::Facility::LOG_AUTH, log::LevelFilter::Warn);
+    match std::panic::catch_unwind(|| authenticate_impl(pamh)) {
+        Ok(Ok(())) => PAM_SUCCESS,
+        Ok(Err(error)) => {
+            log::warn!("NiHao: Authentication failed: {error}");
+            PAM_AUTH_ERR
         }
-        Ok(false) => {
-            log::info!("NiHao: Face not recognized for user: {}", user);
-            Err("Face not recognized".to_string())
-        }
-        Err(e) => {
-            log::warn!("NiHao: Authentication error: {}", e);
-            Err(format!("Authentication error: {}", e))
+        Err(_) => {
+            log::error!("NiHao: authentication panicked");
+            PAM_SERVICE_ERR
         }
     }
 }
 
-pamsm::pam_module!(PamNihao);
+macro_rules! callback {
+    ($name:ident, $result:expr) => {
+        #[no_mangle]
+        pub extern "C" fn $name(
+            _pamh: *mut c_void,
+            _flags: c_int,
+            _argc: c_int,
+            _argv: *const *const c_char,
+        ) -> c_int {
+            $result
+        }
+    };
+}
+
+callback!(pam_sm_setcred, PAM_SUCCESS);
+callback!(pam_sm_acct_mgmt, PAM_SUCCESS);
+callback!(pam_sm_open_session, PAM_SERVICE_ERR);
+callback!(pam_sm_close_session, PAM_SERVICE_ERR);
+callback!(pam_sm_chauthtok, PAM_SERVICE_ERR);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_module_compiles() {
-        // Just verify the module compiles
-        // Actual PAM testing requires pamtester
+    fn c_callbacks_return_full_integer_statuses() {
+        let authenticate: unsafe extern "C" fn(
+            *mut c_void,
+            c_int,
+            c_int,
+            *const *const c_char,
+        ) -> c_int = pam_sm_authenticate;
+        let status = unsafe { authenticate(std::ptr::null_mut(), 0, 0, std::ptr::null()) };
+        assert_eq!(status, PAM_AUTH_ERR);
+        assert_eq!(
+            pam_sm_setcred(std::ptr::null_mut(), 0, 0, std::ptr::null()),
+            PAM_SUCCESS
+        );
     }
 }

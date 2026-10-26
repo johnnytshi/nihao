@@ -12,8 +12,7 @@ name = "pam_nihao"
 path = "src/lib.rs"
 
 [dependencies]
-nihao-core = { path = "../nihao-core" }
-pamsm.workspace = true
-lazy_static.workspace = true
+nihao-auth = { path = "../nihao-auth" }
+libc.workspace = true
 syslog.workspace = true
 log.workspace = true
