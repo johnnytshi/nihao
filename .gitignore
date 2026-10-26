@@ -8,6 +8,7 @@ Cargo.lock
 models/*.onnx
 
 # Test outputs
+__pycache__/
 *.png
 *.jpg
 *.jpeg
