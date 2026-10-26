@@ -1,6 +1,7 @@
 use crate::config::CameraConfig;
 use image::{ImageBuffer, RgbImage};
 use std::fs;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use v4l::io::traits::CaptureStream;
 use v4l::prelude::*;
@@ -18,10 +19,22 @@ pub enum CaptureError {
     #[error("Timeout waiting for frame")]
     Timeout,
     #[error("V4L2 error: {0}")]
-    V4L(#[from] std::io::Error),
+    V4L(#[source] std::io::Error),
     #[error("Bad frame: {0}")]
     BadFrame(String), // Separate error for bad frames that can be retried
 }
+
+impl From<std::io::Error> for CaptureError {
+    fn from(error: std::io::Error) -> Self {
+        if error.kind() == std::io::ErrorKind::TimedOut {
+            Self::Timeout
+        } else {
+            Self::V4L(error)
+        }
+    }
+}
+
+const DEFAULT_CAPTURE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct Camera {
     device: Device,
@@ -93,14 +106,26 @@ impl Camera {
     }
 
 
-    /// Capture a single frame from the camera with quality checks
+    /// Capture a frame with a finite wait, including for enrollment and snapshots.
     pub fn capture_frame(&mut self, check_quality: bool) -> Result<RgbImage, CaptureError> {
-        let mut stream = MmapStream::with_buffers(&self.device, v4l::buffer::Type::VideoCapture, 4)
-            .map_err(|e| CaptureError::Capture(format!("Failed to create stream: {}", e)))?;
+        self.capture_frame_with_timeout(check_quality, DEFAULT_CAPTURE_TIMEOUT)
+    }
 
-        let (buf, _meta) = stream
-            .next()
-            .map_err(|e| CaptureError::Capture(format!("Failed to capture frame: {}", e)))?;
+    /// Capture a frame without waiting beyond the caller's remaining budget.
+    pub fn capture_frame_with_timeout(
+        &mut self,
+        check_quality: bool,
+        timeout: Duration,
+    ) -> Result<RgbImage, CaptureError> {
+        let started = Instant::now();
+        Self::stream_timeout(timeout, Duration::ZERO)?;
+        let mut stream = MmapStream::with_buffers(&self.device, v4l::buffer::Type::VideoCapture, 4)?;
+        stream.set_timeout(Self::stream_timeout(timeout, started.elapsed())?);
+
+        let (buf, _meta) = stream.next()?;
+        if started.elapsed() >= timeout {
+            return Err(CaptureError::Timeout);
+        }
 
         let rgb = match self.format.str() {
             Ok("MJPG") => self.decode_mjpeg(buf)?,
@@ -136,7 +161,20 @@ impl Camera {
             }
         }
 
+        if started.elapsed() >= timeout {
+            return Err(CaptureError::Timeout);
+        }
         Ok(rgb)
+    }
+
+    fn stream_timeout(timeout: Duration, elapsed: Duration) -> Result<Duration, CaptureError> {
+        let remaining = timeout
+            .checked_sub(elapsed)
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(CaptureError::Timeout)?;
+        // v4l converts milliseconds to i32 with unwrap(). Keep long configured
+        // budgets finite and within that range; sub-millisecond waits poll once.
+        Ok(remaining.min(Duration::from_millis(i32::MAX as u64)))
     }
 
 
@@ -342,6 +380,44 @@ impl Camera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_stream_timeout_uses_remaining_budget() {
+        assert_eq!(
+            Camera::stream_timeout(Duration::from_secs(4), Duration::from_millis(1500)).unwrap(),
+            Duration::from_millis(2500)
+        );
+        assert!(matches!(
+            Camera::stream_timeout(Duration::from_secs(4), Duration::from_secs(4)),
+            Err(CaptureError::Timeout)
+        ));
+        assert!(matches!(
+            Camera::stream_timeout(Duration::ZERO, Duration::ZERO),
+            Err(CaptureError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn test_stream_timeout_fits_v4l_millisecond_range() {
+        let timeout = Camera::stream_timeout(Duration::MAX, Duration::ZERO).unwrap();
+        assert_eq!(i32::try_from(timeout.as_millis()).unwrap(), i32::MAX);
+        let short = Duration::from_micros(500);
+        assert_eq!(Camera::stream_timeout(short, Duration::ZERO).unwrap(), short);
+    }
+
+    #[test]
+    fn test_v4l_timeout_preserves_timeout_classification() {
+        let error = std::io::Error::new(std::io::ErrorKind::TimedOut, "VIDIOC_DQBUF");
+        assert!(matches!(CaptureError::from(error), CaptureError::Timeout));
+
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "camera permission");
+        match CaptureError::from(error) {
+            CaptureError::V4L(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            error => panic!("Unexpected capture error: {}", error),
+        }
+    }
 
     #[test]
     fn test_list_devices() {

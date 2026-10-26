@@ -11,6 +11,7 @@ pub mod store;
 use image::{Rgb, RgbImage};
 use imageproc::drawing::{draw_hollow_rect_mut, draw_cross_mut};
 use imageproc::rect::Rect;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
@@ -96,6 +97,24 @@ impl FaceRecognizer {
             self.camera = Some(camera);
         }
         Ok(())
+    }
+
+    fn capture_before_deadline<T>(
+        deadline: Instant,
+        capture: impl FnOnce(Duration) -> Result<T, capture::CaptureError>,
+    ) -> Result<T, Error> {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(Error::Timeout)?;
+        let result = capture(remaining);
+        if Instant::now() >= deadline {
+            return Err(Error::Timeout);
+        }
+        result.map_err(|error| match error {
+            capture::CaptureError::Timeout => Error::Timeout,
+            error => Error::Capture(error),
+        })
     }
 
     /// Authenticate a user by face recognition
@@ -201,31 +220,33 @@ impl FaceRecognizer {
         let embedder = self.embedder.as_mut().unwrap();
         let camera = self.camera.as_mut().unwrap();
 
-        let start_time = std::time::Instant::now();
         let max_frames = self.config.matching.max_frames;
-        let timeout = std::time::Duration::from_secs(self.config.matching.timeout_secs);
+        let timeout = Duration::from_secs(self.config.matching.timeout_secs);
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            Error::Other("Authentication timeout exceeds supported duration".to_string())
+        })?;
 
         // Try multiple frames
         for frame_idx in 0..max_frames {
             let frame_start = std::time::Instant::now();
 
-            // Check timeout
-            if start_time.elapsed() > timeout {
-                log::warn!("Authentication timeout after {} frames", frame_idx);
-                return Err(Error::Timeout);
-            }
-
-            // Capture frame with quality checks
-            let frame = match camera.capture_frame(true) {
+            // Every capture, including debug retries, shares the same deadline.
+            let frame = match Self::capture_before_deadline(deadline, |remaining| {
+                camera.capture_frame_with_timeout(true, remaining)
+            }) {
                 Ok(f) => f,
-                Err(capture::CaptureError::BadFrame(reason)) => {
+                Err(Error::Capture(capture::CaptureError::BadFrame(reason))) => {
                     log::debug!("Skipping bad frame ({}), not counted", reason);
 
                     // Save rejected frame for debugging
                     if self.config.debug.save_screenshots {
                         if let Ok(debug_dir) = Self::ensure_debug_dir(&self.config.debug.output_dir) {
                             // Try to capture a raw frame to show what was rejected
-                            if let Ok(raw_frame) = camera.capture_frame(false) {
+                            if let Ok(raw_frame) =
+                                Self::capture_before_deadline(deadline, |remaining| {
+                                    camera.capture_frame_with_timeout(false, remaining)
+                                })
+                            {
                                 let filename = Self::generate_debug_filename(username, "auth_rejected");
                                 let debug_path = debug_dir.join(filename);
 
@@ -239,6 +260,10 @@ impl FaceRecognizer {
                     }
 
                     continue;
+                }
+                Err(Error::Timeout) => {
+                    log::warn!("Authentication timeout after {} frames", frame_idx);
+                    return Err(Error::Timeout);
                 }
                 Err(e) => {
                     log::warn!("Frame capture failed: {}", e);
@@ -347,6 +372,9 @@ impl FaceRecognizer {
             if let Some(match_result) =
                 compare::find_best_match(&embedding, &enrolled_embeddings, self.config.matching.threshold)
             {
+                if Instant::now() >= deadline {
+                    return Err(Error::Timeout);
+                }
                 log::debug!("⏱️  Matching: {}ms", match_start.elapsed().as_millis());
                 log::debug!("⏱️  TOTAL frame {}: {}ms", frame_idx, frame_start.elapsed().as_millis());
 
@@ -364,6 +392,9 @@ impl FaceRecognizer {
             }
         }
 
+        if Instant::now() >= deadline {
+            return Err(Error::Timeout);
+        }
         log::info!("No match found after {} frames", max_frames);
         Ok(false)
     }
@@ -425,6 +456,9 @@ impl FaceRecognizer {
                     Err(capture::CaptureError::BadFrame(reason)) => {
                         log::debug!("Bad frame {} ({}), skipping...", attempt + 1, reason);
                         continue;
+                    }
+                    Err(error @ capture::CaptureError::Timeout) => {
+                        return Err(Error::Capture(error));
                     }
                     Err(e) => {
                         log::warn!("Frame capture failed: {}", e);
@@ -550,5 +584,68 @@ impl FaceRecognizer {
 
         log::info!("Debug visualization saved to: {}", path);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    #[test]
+    fn expired_deadline_does_not_start_another_capture() {
+        let deadline = Instant::now() - Duration::from_secs(1);
+        let result: Result<(), Error> = FaceRecognizer::capture_before_deadline(deadline, |_| {
+            panic!("Expired authentication must not wait for another camera frame")
+        });
+        assert!(matches!(result, Err(Error::Timeout)));
+    }
+
+    #[test]
+    fn retry_capture_receives_only_the_remaining_budget() {
+        let timeout = Duration::from_secs(4);
+        let deadline = Instant::now() + timeout;
+        let mut first_budget = Duration::ZERO;
+        FaceRecognizer::capture_before_deadline(deadline, |remaining| {
+            assert!(remaining > Duration::ZERO && remaining <= timeout);
+            first_budget = remaining;
+            Ok(())
+        })
+        .unwrap();
+        FaceRecognizer::capture_before_deadline(deadline, |remaining| {
+            assert!(remaining > Duration::ZERO && remaining <= first_budget);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn camera_timeout_ends_authentication() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let result: Result<(), Error> = FaceRecognizer::capture_before_deadline(deadline, |_| {
+            Err(capture::CaptureError::Timeout)
+        });
+        assert!(matches!(result, Err(Error::Timeout)));
+    }
+
+    #[test]
+    fn camera_quality_failure_remains_retryable() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let result: Result<(), Error> = FaceRecognizer::capture_before_deadline(deadline, |_| {
+            Err(capture::CaptureError::BadFrame("too dark".to_string()))
+        });
+        assert!(matches!(
+            result,
+            Err(Error::Capture(capture::CaptureError::BadFrame(_)))
+        ));
+    }
+
+    #[test]
+    fn late_capture_result_cannot_extend_authentication() {
+        let deadline = Instant::now() + Duration::from_millis(20);
+        let result = FaceRecognizer::capture_before_deadline(deadline, |remaining| {
+            std::thread::sleep(remaining + Duration::from_millis(1));
+            Ok("late frame")
+        });
+        assert!(matches!(result, Err(Error::Timeout)));
     }
 }
