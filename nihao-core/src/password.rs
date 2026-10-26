@@ -1,3 +1,4 @@
+use crate::store::{atomic_write_private, open_private_file, validate_path_component};
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
     Aes256Gcm, Nonce,
@@ -6,6 +7,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -51,6 +53,7 @@ impl PasswordStore {
 
     /// Store an encrypted password for a user
     pub fn store_password(&self, username: &str, password: &str) -> Result<(), PasswordError> {
+        let path = self.get_password_path(username)?;
         // Derive encryption key from machine ID
         let key = self.derive_encryption_key()?;
 
@@ -80,17 +83,9 @@ impl PasswordStore {
         // Ensure storage directory exists
         fs::create_dir_all(&self.storage_dir)?;
 
-        // Write to file with restricted permissions
-        let path = self.get_password_path(username);
-        fs::write(&path, json)?;
-
-        // Set file permissions to 0600 (owner read/write only)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let permissions = fs::Permissions::from_mode(0o600);
-            fs::set_permissions(&path, permissions)?;
-        }
+        // Create a private inode before writing, then replace atomically. This
+        // also replaces an existing symlink itself rather than following it.
+        atomic_write_private(&path, json.as_bytes())?;
 
         log::info!("Password stored for user: {}", username);
         Ok(())
@@ -98,16 +93,22 @@ impl PasswordStore {
 
     /// Load and decrypt a password for a user
     pub fn load_password(&self, username: &str) -> Result<String, PasswordError> {
-        let path = self.get_password_path(username);
-
-        // Check if file exists
-        if !path.exists() {
-            return Err(PasswordError::NotFound(username.to_string()));
-        }
-
-        // Read encrypted data
-        let json = fs::read_to_string(&path)?;
+        let path = self.get_password_path(username)?;
+        let mut file = open_private_file(&path, false).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                PasswordError::NotFound(username.to_string())
+            } else {
+                PasswordError::Io(error)
+            }
+        })?;
+        let mut json = String::new();
+        file.read_to_string(&mut json)?;
         let encrypted: EncryptedPassword = serde_json::from_str(&json)?;
+        if encrypted.version != 1 || encrypted.nonce.len() != 12 {
+            return Err(PasswordError::Decryption(
+                "Unsupported password format or invalid nonce length".to_string(),
+            ));
+        }
 
         // Derive encryption key from machine ID
         let key = self.derive_encryption_key()?;
@@ -126,27 +127,33 @@ impl PasswordStore {
             .map_err(|e| PasswordError::Decryption(format!("Invalid UTF-8: {}", e)))
     }
 
-    /// Check if a password is stored for a user
-    pub fn has_password(&self, username: &str) -> bool {
-        self.get_password_path(username).exists()
+    /// Check whether a regular password file exists without hiding I/O errors.
+    pub fn has_password(&self, username: &str) -> Result<bool, PasswordError> {
+        let path = self.get_password_path(username)?;
+        match open_private_file(&path, false) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 
-    /// Remove stored password for a user
+    /// Remove the stored entry itself; remove_file never follows a symlink.
     pub fn remove_password(&self, username: &str) -> Result<(), PasswordError> {
-        let path = self.get_password_path(username);
-
-        if !path.exists() {
-            return Err(PasswordError::NotFound(username.to_string()));
-        }
-
-        fs::remove_file(&path)?;
+        let path = self.get_password_path(username)?;
+        fs::remove_file(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                PasswordError::NotFound(username.to_string())
+            } else {
+                PasswordError::Io(error)
+            }
+        })?;
         log::info!("Password removed for user: {}", username);
         Ok(())
     }
 
-    /// Get the file path for a user's encrypted password
-    fn get_password_path(&self, username: &str) -> PathBuf {
-        self.storage_dir.join(format!("{}.key", username))
+    fn get_password_path(&self, username: &str) -> Result<PathBuf, PasswordError> {
+        validate_path_component(username)?;
+        Ok(self.storage_dir.join(format!("{}.key", username)))
     }
 
     /// Derive encryption key from machine ID using SHA-256
@@ -175,43 +182,150 @@ impl PasswordStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
+    use crate::store::test_support::TestDirectory;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::sync::Arc;
 
     #[test]
-    fn test_password_store_roundtrip() {
-        let temp_dir = env::temp_dir().join("nihao-test-passwords");
-        let store = PasswordStore::new(&temp_dir);
-
-        let username = "testuser";
-        let password = "super_secret_password_123!";
-
-        // Store password
-        store.store_password(username, password).unwrap();
-
-        // Verify it exists
-        assert!(store.has_password(username));
-
-        // Load and verify
-        let loaded = store.load_password(username).unwrap();
-        assert_eq!(loaded, password);
-
-        // Remove and verify
-        store.remove_password(username).unwrap();
-        assert!(!store.has_password(username));
-
-        // Cleanup
-        let _ = fs::remove_dir_all(&temp_dir);
+    fn password_roundtrip_and_atomic_update_use_private_files() {
+        let directory = TestDirectory::new();
+        let store = PasswordStore::new(&directory.0);
+        store
+            .store_password("testuser", "fake-first-password")
+            .unwrap();
+        assert!(store.has_password("testuser").unwrap());
+        assert_eq!(
+            store.load_password("testuser").unwrap(),
+            "fake-first-password"
+        );
+        let path = directory.0.join("testuser.key");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // A pre-existing file's permissive mode must not survive replacement.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        store
+            .store_password("testuser", "fake-second-password")
+            .unwrap();
+        assert_eq!(
+            store.load_password("testuser").unwrap(),
+            "fake-second-password"
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        store.remove_password("testuser").unwrap();
+        assert!(!store.has_password("testuser").unwrap());
     }
 
     #[test]
-    fn test_password_not_found() {
-        let temp_dir = env::temp_dir().join("nihao-test-passwords-notfound");
-        let store = PasswordStore::new(&temp_dir);
+    fn missing_password_is_distinct_from_other_io_errors() {
+        let directory = TestDirectory::new();
+        let store = PasswordStore::new(&directory.0);
+        assert!(matches!(
+            store.load_password("missing"),
+            Err(PasswordError::NotFound(_))
+        ));
+        assert!(!store.has_password("missing").unwrap());
+        fs::create_dir(directory.0.join("directory.key")).unwrap();
+        assert!(matches!(
+            store.load_password("directory"),
+            Err(PasswordError::Io(_))
+        ));
+    }
 
-        let result = store.load_password("nonexistent");
-        assert!(matches!(result, Err(PasswordError::NotFound(_))));
+    #[test]
+    fn malformed_nonces_and_unknown_versions_return_errors_without_panicking() {
+        let directory = TestDirectory::new();
+        let store = PasswordStore::new(&directory.0);
+        for (nonce_len, version) in [(0, 1), (11, 1), (13, 1), (12, 2)] {
+            let encrypted = EncryptedPassword {
+                ciphertext: vec![0; 16],
+                nonce: vec![0; nonce_len],
+                version,
+            };
+            fs::write(
+                directory.0.join("testuser.key"),
+                serde_json::to_vec(&encrypted).unwrap(),
+            )
+            .unwrap();
+            assert!(matches!(
+                store.load_password("testuser"),
+                Err(PasswordError::Decryption(_))
+            ));
+        }
+    }
 
-        // Cleanup
-        let _ = fs::remove_dir_all(&temp_dir);
+    #[test]
+    fn password_symlinks_are_never_followed() {
+        let directory = TestDirectory::new();
+        let outside = directory.0.join("outside");
+        fs::write(&outside, "unrelated data").unwrap();
+        let path = directory.0.join("testuser.key");
+        symlink(&outside, &path).unwrap();
+        let store = PasswordStore::new(&directory.0);
+        assert!(store.load_password("testuser").is_err());
+        assert!(store.has_password("testuser").is_err());
+        store.store_password("testuser", "fake-password").unwrap();
+        assert_eq!(fs::read_to_string(outside).unwrap(), "unrelated data");
+        assert!(!fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+        assert_eq!(store.load_password("testuser").unwrap(), "fake-password");
+    }
+
+    #[test]
+    fn invalid_usernames_cannot_escape_password_storage() {
+        let directory = TestDirectory::new();
+        let store = PasswordStore::new(&directory.0);
+        for username in ["", "..", "../outside", "/absolute", "nested/user"] {
+            assert!(store.store_password(username, "fake-password").is_err());
+            assert!(store.load_password(username).is_err());
+            assert!(store.has_password(username).is_err());
+            assert!(store.remove_password(username).is_err());
+        }
+    }
+
+    #[test]
+    fn inaccessible_password_is_not_reported_as_missing() {
+        // SAFETY: geteuid takes no arguments and has no side effects.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let directory = TestDirectory::new();
+        let store = PasswordStore::new(&directory.0);
+        store.store_password("testuser", "fake-password").unwrap();
+        let path = directory.0.join("testuser.key");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let loaded = store.load_password("testuser");
+        let exists = store.has_password("testuser");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            matches!(loaded, Err(PasswordError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+        assert!(
+            matches!(exists, Err(PasswordError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn concurrent_password_updates_remain_complete_and_decryptable() {
+        let directory = TestDirectory::new();
+        let store = Arc::new(PasswordStore::new(&directory.0));
+        store.store_password("testuser", "fake-original").unwrap();
+        let writer = {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                for _ in 0..30 {
+                    store.store_password("testuser", "fake-updated").unwrap();
+                }
+            })
+        };
+        for _ in 0..100 {
+            let password = store.load_password("testuser").unwrap();
+            assert!(password == "fake-original" || password == "fake-updated");
+        }
+        writer.join().unwrap();
+        assert_eq!(store.load_password("testuser").unwrap(), "fake-updated");
     }
 }

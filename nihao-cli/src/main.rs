@@ -350,7 +350,7 @@ fn cmd_check_password(username: Option<String>) -> anyhow::Result<()> {
 
     let store = PasswordStore::new("/etc/nihao");
 
-    if store.has_password(&username) {
+    if store.has_password(&username)? {
         println!("✓ Password is stored for user: {}", username);
         println!();
         println!("Location: /etc/nihao/{}.key", username);
