@@ -25,11 +25,8 @@ echo "  - PAM module: /lib/security/pam_nihao.so"
 echo "  - CLI binary: /usr/local/bin/nihao"
 echo "  - PAM configuration (restored from /etc/pam.d/system-auth.backup if available)"
 echo
-echo "The following will be KEPT (delete manually if needed):"
-echo "  - Models: /usr/share/nihao/models/"
-echo "  - Config: /etc/nihao/nihao.toml"
-echo "  - Stored passwords: /etc/nihao/*.key (if any)"
-echo "  - Face data: /var/lib/nihao/faces/"
+echo "Models and configuration will also be removed."
+echo "Stored passwords and face data will be kept unless you choose to delete them."
 echo
 
 read -p "Continue with uninstall? (y/N) " -n 1 -r
@@ -38,6 +35,13 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     echo -e "${YELLOW}Uninstall cancelled.${NC}"
     exit 0
 fi
+
+# Remove only NiHao's dedicated KDE service, preserving the password service.
+if [ -f /etc/pam.d/kde-face ] && grep -q '^# NiHao dedicated KDE face authentication$' /etc/pam.d/kde-face; then
+    rm -f /etc/pam.d/kde-face
+fi
+rm -f /usr/lib/nihao/nihao-auth
+if [ -d /usr/lib/nihao ]; then rmdir /usr/lib/nihao 2>/dev/null || true; fi
 
 echo
 
@@ -104,7 +108,9 @@ if [ -d /etc/nihao ]; then
             rm -f /etc/nihao/*.key && echo -e "${GREEN}✓ Removed stored passwords${NC}"
         fi
     fi
-    rm -rf /etc/nihao && echo -e "${GREEN}✓ Removed config${NC}"
+    rm -f /etc/nihao/nihao.toml
+    rmdir /etc/nihao 2>/dev/null || true
+    echo -e "${GREEN}✓ Removed config; any retained password files are preserved${NC}"
 fi
 
 echo
