@@ -1,0 +1,23 @@
+post_install() {
+    cat <<'EOF'
+Nihao is installed. Complete setup before enabling face authentication:
+  /usr/share/doc/nihao/arch-linux.md
+Install appropriately licensed models, select your camera in
+/etc/nihao/nihao.toml, then enroll and test with:
+  sudo nihao add "$USER"
+  sudo nihao test "$USER"
+PAM configuration and KDE preferences require explicit administrator setup.
+EOF
+}
+
+post_upgrade() {
+    echo 'Nihao: review /etc/nihao/nihao.toml.pacnew if created.'
+}
+
+pre_remove() {
+    cat <<'EOF'
+Nihao: remove pam_nihao.so lines from PAM services you configured and remove
+/etc/pam.d/kde-face if you installed the example. Disable KDE Face if enabled.
+Enrollment, downloaded models, and stored password keys are kept.
+EOF
+}

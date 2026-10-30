@@ -2,7 +2,13 @@
 /target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
+
+# Arch package build outputs
+/packaging/arch/src/
+/packaging/arch/pkg/
+/packaging/arch/nihao/
+/packaging/arch/*.pkg.tar.*
+/packaging/arch/*.src.tar.*
 
 # Models (large files, download with script)
 models/*.onnx

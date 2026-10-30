@@ -1,0 +1,58 @@
+# Maintainer: Johnny Ting Shi <johnny.t.shi@gmail.com>
+pkgname=nihao
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Facial authentication for Linux with PAM and an isolated privileged verifier'
+arch=('x86_64')
+url='https://github.com/johnnytshi/nihao'
+license=('MIT')
+depends=('bash' 'glibc' 'libgcc' 'pam' 'onnxruntime-cpu>=1.23')
+makedepends=('cargo' 'rust>=1.88' 'clang' 'git')
+checkdepends=('python')
+optdepends=('v4l-utils: camera discovery and diagnostics'
+            'curl: optional InsightFace model download'
+            'unzip: optional InsightFace model extraction')
+backup=('etc/nihao/nihao.toml')
+install=nihao.install
+options=('!debug')
+# A release tag is fixed; models with separate licensing are downloaded only
+# when the administrator explicitly runs nihao-download-models.
+source=("nihao::git+$url.git#tag=v$pkgver")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$srcdir/nihao"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+    cd "$srcdir/nihao"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --workspace --target "$CARCH-unknown-linux-gnu"
+}
+
+check() {
+    cd "$srcdir/nihao"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo test --frozen --release --workspace --target "$CARCH-unknown-linux-gnu"
+    NIHAO_PAM_MODULE="$PWD/target/$CARCH-unknown-linux-gnu/release/libpam_nihao.so" \
+        python -m unittest discover -s tests -v
+}
+
+package() {
+    cd "$srcdir/nihao"
+    local binaries="target/$CARCH-unknown-linux-gnu/release"
+    install -Dm755 "$binaries/nihao" "$pkgdir/usr/bin/nihao"
+    install -Dm4755 "$binaries/nihao-auth" "$pkgdir/usr/lib/nihao/nihao-auth"
+    install -Dm755 "$binaries/libpam_nihao.so" "$pkgdir/usr/lib/security/pam_nihao.so"
+    install -Dm755 scripts/download_models.sh "$pkgdir/usr/bin/nihao-download-models"
+    install -Dm644 packaging/arch/nihao.toml "$pkgdir/etc/nihao/nihao.toml"
+    install -Dm644 packaging/arch/README.md "$pkgdir/usr/share/doc/nihao/arch-linux.md"
+    install -Dm644 config/kde-face.pam "$pkgdir/usr/share/doc/nihao/kde-face.pam"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/nihao/LICENSE"
+    install -dm700 "$pkgdir/var/lib/nihao/faces"
+    install -dm755 "$pkgdir/usr/share/nihao/models"
+}

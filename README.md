@@ -23,6 +23,24 @@ Fast facial authentication for Linux using PAM. Written in Rust.
 
 ## Quick Start
 
+### Arch Linux packages
+
+Download the x86_64 package from [Releases](https://github.com/johnnytshi/nihao/releases)
+and install it with pacman:
+
+```bash
+sudo pacman -U ./nihao-0.1.0-1-x86_64.pkg.tar.zst
+```
+
+See the [Arch setup guide](packaging/arch/README.md) for models, camera selection,
+enrollment, PAM activation, and migration from a source installation. Models are
+installed separately: the default InsightFace weights have noncommercial
+research terms and are not covered by Nihao's MIT license. Package installation
+preserves system authentication settings until you explicitly enable Nihao.
+
+The AUR recipe is ready in `packaging/arch`; `paru -S nihao` becomes available
+after the maintainer submits it to the AUR.
+
 ### Automated Installation
 
 Run the install script to set up everything automatically:

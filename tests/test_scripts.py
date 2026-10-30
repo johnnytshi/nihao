@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 PROJECT = Path(__file__).resolve().parents[1]
+PAM_MODULE = Path(os.environ.get("NIHAO_PAM_MODULE", PROJECT / "target/debug/libpam_nihao.so"))
 
 
 class ScriptTests(unittest.TestCase):
@@ -107,10 +108,10 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual(preference.read_text(), "false")
 
 
-@unittest.skipUnless((PROJECT / "target/debug/libpam_nihao.so").exists(), "build PAM module first")
+@unittest.skipUnless(PAM_MODULE.exists(), "build PAM module first")
 class NativePamTests(unittest.TestCase):
     def test_c_integer_abi_accepts_zero_and_combined_flags(self):
-        module = ctypes.CDLL(str(PROJECT / "target/debug/libpam_nihao.so"))
+        module = ctypes.CDLL(str(PAM_MODULE))
         signature = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
         module.pam_sm_authenticate.argtypes = signature
         module.pam_sm_authenticate.restype = ctypes.c_int

@@ -1,0 +1,28 @@
+# Packaged system policy. Choose the correct camera before enrolling.
+[camera]
+device = "/dev/video0"
+width = 640
+height = 480
+detection_scale = 0.5
+dark_threshold = 80.0
+
+[detection]
+model_path = "/usr/share/nihao/models/scrfd_500m.onnx"
+confidence_threshold = 0.5
+
+[embedding]
+model_path = "/usr/share/nihao/models/arcface_mobilefacenet.onnx"
+
+[matching]
+threshold = 0.4
+max_frames = 10
+timeout_secs = 4
+
+[runtime]
+
+[storage]
+database_path = "/var/lib/nihao/faces"
+
+[debug]
+save_screenshots = false
+output_dir = "/var/cache/nihao/debug"

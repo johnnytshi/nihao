@@ -1,0 +1,150 @@
+name: Arch Linux package
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arch-package-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install build and test dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            rust clang git pam onnxruntime-cpu python curl unzip namcap
+          # Password-storage tests derive a key from the host identity. Minimal
+          # containers ship an empty machine-id; give this disposable job its own.
+          if [[ ! -s /etc/machine-id ]]; then
+            tr -d '-' < /proc/sys/kernel/random/uuid > /etc/machine-id
+          fi
+
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Prepare package from this checkout
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF_TYPE" == tag ]]; then
+            package_version=$(bash -c 'source packaging/arch/PKGBUILD; printf "%s" "$pkgver"')
+            [[ "$REF_NAME" == "v$package_version" ]] || {
+              echo "Release tag $REF_NAME does not match package version $package_version" >&2
+              exit 1
+            }
+          fi
+          test -f Cargo.lock
+          useradd --create-home --shell /bin/bash builder
+          install -d /tmp/nihao-build /tmp/nihao-dist
+          cp -a packaging/arch/. /tmp/nihao-build/
+          git -c safe.directory="$GITHUB_WORKSPACE" archive \
+            --format=tar --prefix=nihao/ HEAD > /tmp/nihao-build/nihao-ci.tar
+          snapshot_checksum=$(sha256sum /tmp/nihao-build/nihao-ci.tar)
+          snapshot_checksum=${snapshot_checksum%% *}
+          # The AUR recipe fetches a release tag. For CI, build the exact checked-out
+          # commit, including pull-request merge commits and newly created tags.
+          printf '\nsource=("nihao-ci.tar")\nsha256sums=("%s")\n' \
+            "$snapshot_checksum" >> /tmp/nihao-build/PKGBUILD
+          chown -R builder:builder /tmp/nihao-build /tmp/nihao-dist
+
+      - name: Build and run package checks without root
+        run: |
+          set -euo pipefail
+          runuser -u builder -- env PKGDEST=/tmp/nihao-dist \
+            bash -c 'cd /tmp/nihao-build && makepkg --cleanbuild --noconfirm'
+
+      - name: Verify package contents and record checksums
+        run: |
+          set -euo pipefail
+          packages=(/tmp/nihao-dist/*.pkg.tar.zst)
+          test -f "${packages[0]}"
+          for package in "${packages[@]}"; do
+            python scripts/check_arch_package.py "$package"
+            namcap "$package"
+          done
+          cd /tmp/nihao-dist
+          sha256sum -- *.pkg.tar.zst > SHA256SUMS
+
+      - name: Verify installation and data preservation in this disposable container
+        run: |
+          set -euo pipefail
+          find /etc/pam.d -type f -exec sha256sum {} + | sort > /tmp/pam.before
+          pacman -U --noconfirm /tmp/nihao-dist/nihao-*.pkg.tar.zst
+          nihao --version
+          nihao-download-models --help >/dev/null
+          [[ "$(stat -c '%u:%g:%a' /usr/lib/nihao/nihao-auth)" == 0:0:4755 ]]
+          install -dm700 /var/lib/nihao/faces/package-test
+          printf 'fixture enrollment' > /var/lib/nihao/faces/package-test/face.bin
+          printf 'fixture key' > /etc/nihao/package-test.key
+          printf 'fixture model' > /usr/share/nihao/models/package-test.onnx
+          printf '\n# package lifecycle fixture\n' >> /etc/nihao/nihao.toml
+          pacman -U --noconfirm /tmp/nihao-dist/nihao-*.pkg.tar.zst
+          grep -q 'package lifecycle fixture' /etc/nihao/nihao.toml
+          pacman -R --noconfirm nihao
+          test -f /var/lib/nihao/faces/package-test/face.bin
+          test -f /etc/nihao/package-test.key
+          test -f /usr/share/nihao/models/package-test.onnx
+          grep -q 'package lifecycle fixture' /etc/nihao/nihao.toml.pacsave
+          find /etc/pam.d -type f -exec sha256sum {} + | sort > /tmp/pam.after
+          cmp /tmp/pam.before /tmp/pam.after
+
+      - name: Upload package
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: nihao-arch-x86_64
+          path: |
+            /tmp/nihao-dist/*.pkg.tar.zst
+            /tmp/nihao-dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified package
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: nihao-arch-x86_64
+          path: dist
+
+      - name: Publish package on GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum --check SHA256SUMS
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" --clobber -- *.pkg.tar.zst SHA256SUMS
+          else
+            gh release create "$RELEASE_TAG" --verify-tag \
+              --title "NiHao $RELEASE_TAG" --generate-notes \
+              -- *.pkg.tar.zst SHA256SUMS
+          fi

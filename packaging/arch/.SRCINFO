@@ -1,0 +1,27 @@
+pkgbase = nihao
+	pkgdesc = Facial authentication for Linux with PAM and an isolated privileged verifier
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/johnnytshi/nihao
+	install = nihao.install
+	arch = x86_64
+	license = MIT
+	checkdepends = python
+	makedepends = cargo
+	makedepends = rust>=1.88
+	makedepends = clang
+	makedepends = git
+	depends = bash
+	depends = glibc
+	depends = libgcc
+	depends = pam
+	depends = onnxruntime-cpu>=1.23
+	optdepends = v4l-utils: camera discovery and diagnostics
+	optdepends = curl: optional InsightFace model download
+	optdepends = unzip: optional InsightFace model extraction
+	options = !debug
+	backup = etc/nihao/nihao.toml
+	source = nihao::git+https://github.com/johnnytshi/nihao.git#tag=v0.1.0
+	sha256sums = SKIP
+
+pkgname = nihao
